@@ -2,14 +2,16 @@ import 'server-only';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import sharp from 'sharp';
 import { db } from '@/server/db/client';
 import { chapterPages, chapters, characters, glossaryTerms, series, translationJobs, translationSegments } from '@/server/db/schema';
-import { getImage } from '@/server/storage';
+import { deleteImage, getImage, putDeliveryImage } from '@/server/storage';
 import { serverEnv } from '@/server/env';
 import { DalError } from '@/server/errors';
 import { requireRole } from '@/server/auth/actor';
 import { recordAudit } from '@/server/data/audit';
-import { getOCRProvider, getTranslationProvider, MalformedAIOutputError, type OCRRegion, type TranslationContext } from './providers';
+import { getImageCleanupProvider, getOCRProvider, getTranslationProvider, MalformedAIOutputError, type OCRRegion, type TranslationContext } from './providers';
+import { renderMongolianText } from './typesetting';
 
 function isPrivateAddress(address: string) {
   if (isIP(address) === 4) {
@@ -77,7 +79,7 @@ function qualityFlags(source: string, translated: string, ocrConfidence: number,
   return [...new Set(flags)];
 }
 
-async function setStage(jobId: string, stage: 'ocr' | 'context_building' | 'translating' | 'qa', progress: number) {
+async function setStage(jobId: string, stage: 'ocr' | 'context_building' | 'translating' | 'cleaning' | 'typesetting' | 'optimizing' | 'qa', progress: number) {
   const [row] = await db().update(translationJobs).set({ stage, stageProgress: progress })
     .where(and(eq(translationJobs.id, jobId), eq(translationJobs.status, 'running'))).returning({ id: translationJobs.id });
   if (!row) throw new DalError('CONFLICT', 'This job was cancelled or changed while it was running.');
@@ -87,15 +89,17 @@ async function setStage(jobId: string, stage: 'ocr' | 'context_building' | 'tran
 export async function runTranslationJob(jobId: string) {
   const actor = await requireRole('editor');
   const [claimed] = await db().transaction(async tx => {
-    const [job] = await tx.select({ id: translationJobs.id, chapterId: translationJobs.chapterId }).from(translationJobs)
+    const [job] = await tx.select({ id: translationJobs.id, chapterId: translationJobs.chapterId, attempt: translationJobs.attempt }).from(translationJobs)
       .where(and(eq(translationJobs.id, jobId), eq(translationJobs.status, 'queued'))).for('update');
     if (!job) throw new DalError('CONFLICT', 'Only queued translation jobs can be run.');
     await tx.update(translationJobs).set({ status: 'running', stage: 'ocr', stageProgress: 0, startedAt: new Date(), finishedAt: null, errorCode: null, errorMessage: null }).where(eq(translationJobs.id, job.id));
     await tx.update(chapters).set({ status: 'processing' }).where(eq(chapters.id, job.chapterId));
     await tx.delete(translationSegments).where(eq(translationSegments.jobId, job.id));
+    await tx.update(chapterPages).set({ outputKey: null, outputBytes: null, visualQaFlags: [] }).where(eq(chapterPages.chapterId, job.chapterId));
     return [job];
   });
 
+  const storedOutputs: string[] = [];
   try {
     const [job] = await db().select({ id: translationJobs.id, chapterId: chapters.id, chapterNumber: chapters.number, chapterTitle: chapters.title,
       seriesId: series.id, seriesTitle: series.title, seriesDescription: series.description, sourceLanguage: translationJobs.sourceLanguage, targetLanguage: translationJobs.targetLanguage })
@@ -114,7 +118,7 @@ export async function runTranslationJob(jobId: string) {
       .where(and(eq(chapters.seriesId, job.seriesId), inArray(translationSegments.reviewStatus, ['approved', 'edited']), sql`${translationSegments.translatedText} is not null`))
       .orderBy(sql`${translationSegments.updatedAt} desc`).limit(500);
     const ocrProvider = getOCRProvider(); const translationProvider = getTranslationProvider();
-    const byPage = new Map<string, (OCRRegion & { id: string; pageNumber: number; malformed?: boolean; translatedText?: string; translationConfidence?: number })[]>();
+    const byPage = new Map<string, (OCRRegion & { id: string; pageNumber: number; malformed?: boolean; translatedText?: string; translationConfidence?: number; qaFlags: string[] })[]>();
     for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
       await setStage(job.id, 'ocr', Math.floor((pageIndex / pages.length) * 100));
       const page = pages[pageIndex];
@@ -135,7 +139,7 @@ export async function runTranslationJob(jobId: string) {
         jobId: job.id, pageId: page.id, position, kind: region.kind, x: region.x, y: region.y, w: region.w, h: region.h,
         sourceText: region.text.trim(), confidence: null, ocrConfidence: region.confidence, translationConfidence: null, processingStatus: 'ocr_complete',
       }))).returning({ id: translationSegments.id }) : [];
-      byPage.set(page.id, validRegions.map((region, i) => ({ ...region, id: inserted[i].id, pageNumber: page.pageNumber, malformed: malformedOCR && i === validRegions.length - 1 })));
+      byPage.set(page.id, validRegions.map((region, i) => ({ ...region, id: inserted[i].id, pageNumber: page.pageNumber, malformed: malformedOCR && i === validRegions.length - 1, qaFlags: [] })));
     }
     await setStage(job.id, 'context_building', 100);
     const all = [...byPage.entries()].flatMap(([pageId, regions]) => regions.map(region => ({ pageId, ...region })));
@@ -174,12 +178,62 @@ export async function runTranslationJob(jobId: string) {
       if (malformed) qaFlags.push('malformed_output');
       if (serverEnv().OCR_PROVIDER === 'mock' || serverEnv().TRANSLATION_PROVIDER === 'mock') qaFlags.push('mock_provider_output');
       const uniqueFlags = [...new Set(qaFlags)];
+      item.qaFlags = uniqueFlags;
       await db().update(translationSegments).set({ translatedText, confidence: translationConfidence, translationConfidence,
         processingStatus: uniqueFlags.length ? 'needs_review' : 'complete', qaFlags: uniqueFlags, warning: uniqueFlags.length ? uniqueFlags.join(', ') : null,
         reviewStatus: uniqueFlags.length ? 'flagged' : 'pending' }).where(eq(translationSegments.id, item.id));
       item.translatedText = translatedText;
       previousTranslations.push({ source: item.text, translation: translatedText });
       processed++;
+    }
+    const cleanupProvider = getImageCleanupProvider();
+    const pageQA: { id: string; flags: string[]; outputKey: string | null; outputBytes: number | null }[] = [];
+    const criticalVisualFlags = new Set(['cleanup_failed', 'cleanup_unavailable', 'missing_translation', 'overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'delivery_storage_failed']);
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      const page = pages[pageIndex];
+      const pageSegments = all.filter(segment => segment.pageId === page.id);
+      const boxes = pageSegments.map(segment => ({ id: segment.id, x: segment.x, y: segment.y, w: segment.w, h: segment.h, text: segment.translatedText ?? '' }));
+      await setStage(job.id, 'cleaning', Math.floor((pageIndex / pages.length) * 100));
+      const master = await loadPage(page.sourceKey);
+      let cleanedImage = master.bytes;
+      let inpainted = false;
+      const pageFlags = new Set<string>();
+      if (boxes.length) {
+        try {
+          const cleaned = await cleanupProvider.clean(master.bytes, master.mime, boxes.map(({ x, y, w, h }) => ({ x, y, w, h })));
+          const [before, after] = await Promise.all([sharp(master.bytes).metadata(), sharp(cleaned.image, { failOn: 'error' }).metadata()]);
+          if (before.width !== after.width || before.height !== after.height) throw new Error('Image cleanup changed page dimensions.');
+          cleanedImage = cleaned.image; inpainted = cleaned.inpainted;
+      if (!inpainted) pageFlags.add('cleanup_unavailable');
+        } catch {
+          pageFlags.add('cleanup_failed');
+        }
+      }
+      await setStage(job.id, 'typesetting', Math.floor((pageIndex / pages.length) * 100));
+      const typeset = await renderMongolianText(cleanedImage, boxes, inpainted);
+      for (const visualFlag of typeset.pageFlags) pageFlags.add(visualFlag);
+      for (const [segmentId, segmentFlags] of typeset.flags) if (segmentFlags.length) {
+        const segment = pageSegments.find(item => item.id === segmentId);
+        if (segment) segment.qaFlags.push(...segmentFlags);
+      }
+      await setStage(job.id, 'optimizing', Math.floor((pageIndex / pages.length) * 100));
+      let outputKey: string | null = null; let outputBytes: number | null = null;
+      if (![...pageFlags].some(flag => criticalVisualFlags.has(flag))) {
+        const candidateKey = `chapters/${job.chapterId}/delivery-${claimed.attempt}-${String(page.pageNumber).padStart(4, '0')}.png`;
+        try {
+          await putDeliveryImage(candidateKey, typeset.image);
+          storedOutputs.push(candidateKey);
+          outputKey = candidateKey; outputBytes = typeset.image.length;
+        } catch { pageFlags.add('delivery_storage_failed'); }
+      }
+      const dbVisualFlags = [...pageFlags];
+      pageQA.push({ id: page.id, flags: dbVisualFlags, outputKey, outputBytes });
+      for (const segment of pageSegments) {
+        const flags = [...new Set([...segment.qaFlags, ...pageFlags])];
+        await db().update(translationSegments).set({ qaFlags: flags, warning: flags.length ? flags.join(', ') : null,
+          processingStatus: flags.length ? 'needs_review' : 'complete', reviewStatus: flags.length ? 'flagged' : 'pending' }).where(eq(translationSegments.id, segment.id));
+      }
+      await db().update(chapterPages).set({ outputKey, outputBytes, visualQaFlags: dbVisualFlags }).where(eq(chapterPages.id, page.id));
     }
     await setStage(job.id, 'qa', 100);
     await db().transaction(async tx => {
@@ -188,14 +242,17 @@ export async function runTranslationJob(jobId: string) {
       if (!stillRunning) throw new DalError('CONFLICT', 'This job was cancelled or changed before completion.');
       await tx.update(chapters).set({ status: 'in_review' }).where(eq(chapters.id, claimed.chapterId));
       await tx.update(translationJobs).set({ status: 'ready', stage: 'ready', stageProgress: 100, finishedAt: new Date(),
-        options: sql`jsonb_set(${translationJobs.options}, '{providers}', ${JSON.stringify({ ocr: serverEnv().OCR_PROVIDER, translation: serverEnv().TRANSLATION_PROVIDER })}::jsonb, true)` })
+        options: sql`jsonb_set(${translationJobs.options}, '{providers}', ${JSON.stringify({ ocr: serverEnv().OCR_PROVIDER, translation: serverEnv().TRANSLATION_PROVIDER, cleanup: serverEnv().IMAGE_CLEANUP_PROVIDER, typesetting: 'opentype-noto-sans' })}::jsonb, true)` })
         .where(and(eq(translationJobs.id, job.id), eq(translationJobs.status, 'running')));
-      await recordAudit(tx, actor, { action: 'translation_job.complete', targetType: 'translation_job', targetId: job.id, metadata: { chapterId: job.chapterId, segments: all.length, providers: [serverEnv().OCR_PROVIDER, serverEnv().TRANSLATION_PROVIDER] } });
+      const qaFlagCount = pageQA.reduce((total, page) => total + page.flags.length, 0);
+      await recordAudit(tx, actor, { action: 'translation_job.complete', targetType: 'translation_job', targetId: job.id, metadata: { chapterId: job.chapterId, segments: all.length, visualFlags: qaFlagCount, providers: [serverEnv().OCR_PROVIDER, serverEnv().TRANSLATION_PROVIDER, serverEnv().IMAGE_CLEANUP_PROVIDER] } });
     });
     return { id: job.id, segments: all.length, status: 'ready' as const };
   } catch (error) {
     const safeMessage = error instanceof DalError ? error.message : error instanceof Error ? error.message.slice(0, 500) : 'Translation job failed.';
+    await Promise.all(storedOutputs.map(deleteImage));
     await db().transaction(async tx => {
+      await tx.update(chapterPages).set({ outputKey: null, outputBytes: null }).where(eq(chapterPages.chapterId, claimed.chapterId));
       await tx.update(translationJobs).set({ status: 'failed', errorCode: 'processing_failed', errorMessage: safeMessage, finishedAt: new Date() })
         .where(and(eq(translationJobs.id, claimed.id), eq(translationJobs.status, 'running')));
       await tx.update(chapters).set({ status: 'failed' }).where(and(eq(chapters.id, claimed.chapterId), eq(chapters.status, 'processing')));

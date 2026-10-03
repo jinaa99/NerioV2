@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  outputFileTracingIncludes: {
+    '/api/admin/pipeline/*/run': ['./assets/fonts/NotoSans-Variable.ttf'],
+  },
 };
 
 export default nextConfig;

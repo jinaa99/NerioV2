@@ -23,6 +23,10 @@ export interface OCRProvider {
 export interface TranslationProvider {
   translate(sourceText: string, context: TranslationContext): Promise<TranslationResult>;
 }
+export type ImageMask = { x: number; y: number; w: number; h: number };
+export interface ImageCleanupProvider {
+  clean(image: Buffer, mimeType: string, masks: ImageMask[]): Promise<{ image: Buffer; inpainted: boolean }>;
+}
 
 const regionsSchema = z.array(z.object({
   text: z.string().max(4000), x: z.number().min(0).max(1), y: z.number().min(0).max(1),
@@ -89,9 +93,36 @@ class OpenAICompatibleTranslationProvider implements TranslationProvider {
   }
 }
 
+class MockImageCleanupProvider implements ImageCleanupProvider {
+  async clean(image: Buffer): Promise<{ image: Buffer; inpainted: boolean }> {
+    return { image, inpainted: false };
+  }
+}
+
+class HttpImageCleanupProvider implements ImageCleanupProvider {
+  async clean(image: Buffer, mimeType: string, masks: ImageMask[]): Promise<{ image: Buffer; inpainted: boolean }> {
+    const env = serverEnv();
+    if (!env.IMAGE_CLEANUP_URL?.trim() || !env.AI_API_KEY?.trim()) throw new Error('Image cleanup URL and AI_API_KEY are required for image cleanup.');
+    const url = new URL(env.IMAGE_CLEANUP_URL);
+    if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Image cleanup URL must be a valid HTTPS endpoint.');
+    const response = await fetch(url, {
+      method: 'POST', headers: { Authorization: `Bearer ${env.AI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageBase64: image.toString('base64'), mimeType, masks, instruction: 'Inpaint only masked Korean lettering. Reconstruct nearby artwork and bubble background. Preserve all pixels outside masks and keep original image dimensions. Return JSON with imageBase64 and inpainted:true.' }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!response.ok) throw new Error(`Image cleanup provider returned HTTP ${response.status}.`);
+    const payload = z.object({ imageBase64: z.string().min(1).max(100_000_000), inpainted: z.literal(true) }).strict().parse(await response.json());
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload.imageBase64)) throw new Error('Image cleanup provider returned malformed image data.');
+    return { image: Buffer.from(payload.imageBase64, 'base64'), inpainted: true };
+  }
+}
+
 export function getOCRProvider(): OCRProvider {
   return serverEnv().OCR_PROVIDER === 'mock' ? new MockOCRProvider() : new OpenAICompatibleOCRProvider();
 }
 export function getTranslationProvider(): TranslationProvider {
   return serverEnv().TRANSLATION_PROVIDER === 'mock' ? new MockTranslationProvider() : new OpenAICompatibleTranslationProvider();
+}
+export function getImageCleanupProvider(): ImageCleanupProvider {
+  return serverEnv().IMAGE_CLEANUP_PROVIDER === 'mock' ? new MockImageCleanupProvider() : new HttpImageCleanupProvider();
 }

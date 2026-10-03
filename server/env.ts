@@ -32,6 +32,13 @@ const schema = z.object({
   TRANSLATION_MODEL: z.string().min(1).default('gpt-4o-mini'),
   OCR_CONFIDENCE_MIN: z.coerce.number().min(0).max(1).default(0.65),
   TRANSLATION_CONFIDENCE_MIN: z.coerce.number().min(0).max(1).default(0.65),
+  IMAGE_CLEANUP_PROVIDER: z.enum(['mock', 'http_json']).default('mock'),
+  IMAGE_CLEANUP_URL: z.string().optional(),
+  TYPESET_MIN_FONT_SIZE: z.coerce.number().int().min(8).max(24).default(12),
+  TYPESET_MAX_FONT_SIZE: z.coerce.number().int().min(12).max(72).default(36),
+  TYPESET_LINE_HEIGHT: z.coerce.number().min(1).max(2).default(1.18),
+  TYPESET_BUBBLE_PADDING: z.coerce.number().min(0).max(0.3).default(0.1),
+  TYPESET_ALIGNMENT: z.enum(['left', 'center', 'right']).default('center'),
 });
 
 export type ServerEnv = z.infer<typeof schema>;

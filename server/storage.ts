@@ -12,13 +12,13 @@ import { serverEnv } from './env';
 export function imageSrc(ref: string | null | undefined): string | null {
   if (!ref) return null;
   if (ref.startsWith('https://')) return ref;
-  if (/^chapters\/[a-z0-9-]+\/[0-9]{1,4}\.png$/.test(ref)) return `/api/media/${ref}`;
+  if (isChapterImageKey(ref)) return `/api/media/${ref}`;
   return null;
 }
 
 /** Private local provider. Deployments can replace this implementation with S3/R2 behind this API. */
 export async function putImage(key: string, body: Buffer): Promise<void> {
-  if (!/^chapters\/[a-z0-9-]+\/[0-9]{1,4}\.png$/.test(key)) throw new Error('Invalid storage key');
+  if (!isChapterImageKey(key) || key.includes('/delivery-')) throw new Error('Invalid source image storage key');
   const root = path.resolve(serverEnv().NERIO_STORAGE_DIR);
   const destination = path.resolve(root, key);
   if (!destination.startsWith(`${root}${path.sep}`)) throw new Error('Invalid storage key');
@@ -26,12 +26,25 @@ export async function putImage(key: string, body: Buffer): Promise<void> {
   await writeFile(destination, body, { flag: 'wx', mode: 0o600 });
 }
 
+export async function putDeliveryImage(key: string, body: Buffer): Promise<void> {
+  if (!/^chapters\/[a-z0-9-]+\/delivery-[0-9]{1,4}-[0-9]{1,4}\.png$/.test(key)) throw new Error('Invalid delivery image key');
+  const root = path.resolve(serverEnv().NERIO_STORAGE_DIR);
+  const destination = path.resolve(root, key);
+  if (!destination.startsWith(`${root}${path.sep}`)) throw new Error('Invalid delivery image key');
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeFile(destination, body, { flag: 'wx', mode: 0o600 });
+}
+
 export async function deleteImage(key: string): Promise<void> {
-  if (!/^chapters\/[a-z0-9-]+\/[0-9]{1,4}\.png$/.test(key)) return;
+  if (!isChapterImageKey(key)) return;
   await unlink(path.resolve(serverEnv().NERIO_STORAGE_DIR, key)).catch(() => undefined);
 }
 
 export async function getImage(key: string): Promise<Buffer | null> {
-  if (!/^chapters\/[a-z0-9-]+\/[0-9]{1,4}\.png$/.test(key)) return null;
+  if (!isChapterImageKey(key)) return null;
   return readFile(path.resolve(serverEnv().NERIO_STORAGE_DIR, key)).catch(() => null);
+}
+
+export function isChapterImageKey(key: string): boolean {
+  return /^chapters\/[a-z0-9-]+\/(?:[0-9]{1,4}|delivery-[0-9]{1,4}-[0-9]{1,4})\.png$/.test(key);
 }

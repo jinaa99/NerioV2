@@ -110,6 +110,7 @@ export default function Review({ job }: { job: ReviewJobDTO }) {
           <Icon name="lock" size={18} />This chapter isn’t waiting for review anymore ({job.chapter.status.replace('_', ' ')}), so it’s read-only.
         </div>
       )}
+      {!!page.visualQaFlags.length && <div className="row" role="alert" style={{ gap: 8, padding: '10px 14px', borderRadius: 12, border: '1px solid rgba(229,103,92,.3)', background: 'rgba(229,103,92,.07)', fontSize: 12, color: 'var(--danger-text)' }}><Icon name="warning" size={18} />Visual QA: {page.visualQaFlags.join(', ')}. Critical failures block publishing; send the chapter back after configuring image cleanup or correcting the text.</div>}
       <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
         <Segmented h={30} options={[[0, 'Side by side'], [1, 'Original'], [2, 'Translated']]} value={view} onChange={v => setView(v as 0 | 1 | 2)} />
         <Button variant="outline" h={36} px={10} fs={12} icon="select_all" aria-pressed={boxes} onClick={() => setBoxes(b => !b)}
@@ -123,15 +124,15 @@ export default function Review({ job }: { job: ReviewJobDTO }) {
             <div key={pane.label} className="stack" style={{ gap: 8 }}>
               <span style={{ font: '500 11px var(--mono)', letterSpacing: '.08em', color: 'var(--ink-3)' }}>{pane.label}</span>
               <div style={{ position: 'relative', aspectRatio: `${page.width}/${page.height}`, borderRadius: 10, overflow: 'hidden', background: 'var(--s2)', border: '1px solid rgba(255,255,255,.08)' }}>
-                {page.src
+                {(pane.translated ? page.outputSrc ?? page.src : page.src)
                   // eslint-disable-next-line @next/next/no-img-element -- original page from storage/URL, shown as-is
-                  ? <img src={page.src} alt={`Page ${page.pageNumber}`} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }} />
+                  ? <img src={pane.translated ? page.outputSrc ?? page.src! : page.src!} alt={`Page ${page.pageNumber}`} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }} />
                   : <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: 'var(--ink-4)' }}><Icon name="hide_image" /></div>}
                 {onPage.map(s => {
                   const [c] = confColors(s.translationConfidence ?? s.confidence ?? 0);
                   const isSel = sel === s.id;
                   const text = editing === s.id ? draft : s.translatedText ?? '';
-                  if (!pane.translated && !boxes) return null;
+                  if ((!pane.translated && !boxes) || (pane.translated && page.outputSrc)) return null;
                   return (
                     <div key={s.id} style={{ position: 'absolute', left: `${s.x * 100}%`, top: `${s.y * 100}%`, width: `${s.w * 100}%`, height: `${s.h * 100}%` }}>
                       <button type="button" aria-label={`Region ${s.position}`} className="region-btn" onClick={() => setSel(s.id)}

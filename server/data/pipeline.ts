@@ -126,11 +126,12 @@ export async function queueChapter(chapterId: string, targetLanguage = 'mn') {
     const [ch] = await tx.select({ id: chapters.id, status: chapters.status, pageCount: chapters.pageCount, sourceLanguage: series.sourceLanguage })
       .from(chapters).innerJoin(series, eq(series.id, chapters.seriesId)).where(eq(chapters.id, id)).for('update');
     if (!ch) throw new DalError('NOT_FOUND', 'Chapter not found.');
+    if (ch.status === 'published') throw new DalError('CONFLICT', 'Unpublish this chapter before reprocessing its pages.');
     if (ch.pageCount === 0) throw new DalError('CONFLICT', 'Add pages before queueing the chapter.');
     const [active] = await tx.select({ id: translationJobs.id }).from(translationJobs).where(and(eq(translationJobs.chapterId, id), inArray(translationJobs.status, ['queued', 'running'])));
     if (active) throw new DalError('CONFLICT', 'This chapter already has a job in progress.');
     const [job] = await tx.insert(translationJobs).values({ chapterId: id, sourceLanguage: ch.sourceLanguage, targetLanguage: target, requestedBy: actor.userId }).returning({ id: translationJobs.id });
-    if (ch.status !== 'published') await tx.update(chapters).set({ status: 'processing' }).where(eq(chapters.id, id));
+    await tx.update(chapters).set({ status: 'processing' }).where(eq(chapters.id, id));
     await recordAudit(tx, actor, { action: 'translation_job.create', targetType: 'translation_job', targetId: job.id, metadata: { chapterId: id } });
     return job;
   });
@@ -195,7 +196,7 @@ export type ReviewJobDTO = {
   jobId: string; jobStatus: JobStatus; sourceLanguage: string; targetLanguage: string;
   chapter: { id: string; number: number; title: string | null; status: string };
   series: { title: string; slug: string };
-  pages: { id: string; pageNumber: number; width: number; height: number; src: string | null }[];
+  pages: { id: string; pageNumber: number; width: number; height: number; src: string | null; outputSrc: string | null; visualQaFlags: string[] }[];
   segments: ReviewSegmentDTO[];
 };
 
@@ -210,7 +211,7 @@ export async function getReviewJob(jobId: string): Promise<ReviewJobDTO | null> 
     .where(eq(translationJobs.id, id.data));
   if (!job) return null;
   const [pages, segments] = await Promise.all([
-    db().select({ id: chapterPages.id, pageNumber: chapterPages.pageNumber, width: chapterPages.width, height: chapterPages.height, sourceKey: chapterPages.sourceKey, outputKey: chapterPages.outputKey })
+    db().select({ id: chapterPages.id, pageNumber: chapterPages.pageNumber, width: chapterPages.width, height: chapterPages.height, sourceKey: chapterPages.sourceKey, outputKey: chapterPages.outputKey, visualQaFlags: chapterPages.visualQaFlags })
       .from(chapterPages).where(eq(chapterPages.chapterId, job.chapterId)).orderBy(asc(chapterPages.pageNumber)),
     db().select({
       id: translationSegments.id, pageId: translationSegments.pageId, pageNumber: chapterPages.pageNumber, position: translationSegments.position, kind: translationSegments.kind,
@@ -227,7 +228,7 @@ export async function getReviewJob(jobId: string): Promise<ReviewJobDTO | null> 
     chapter: { id: job.chapterId, number: job.number, title: job.chapterTitle, status: job.chapterStatus },
     series: { title: job.seriesTitle, slug: job.slug },
     // Review shows the original upload; the typeset output (when present) is the "translated" pane.
-    pages: pages.map(p => ({ id: p.id, pageNumber: p.pageNumber, width: p.width, height: p.height, src: imageSrc(p.sourceKey) })),
+    pages: pages.map(p => ({ id: p.id, pageNumber: p.pageNumber, width: p.width, height: p.height, src: imageSrc(p.sourceKey), outputSrc: imageSrc(p.outputKey), visualQaFlags: p.visualQaFlags })),
     segments,
   };
 }
@@ -289,6 +290,13 @@ export async function publishReviewed(jobId: string) {
     const [{ open }] = await tx.select({ open: count() }).from(translationSegments)
       .where(and(eq(translationSegments.jobId, id), inArray(translationSegments.reviewStatus, ['pending', 'flagged'])));
     if (open > 0) throw new DalError('CONFLICT', `${open} region${open === 1 ? '' : 's'} still need approval.`);
+    const [pageCheck] = await tx.select({ total: count(), missing: sql<number>`count(*) filter (where ${chapterPages.outputKey} is null)::int`, critical: sql<number>`count(*) filter (where ${chapterPages.visualQaFlags} ?| array['cleanup_failed','cleanup_unavailable','missing_translation','overflow','clipping','outside_region','overlapping_text','unreadably_small_text','delivery_storage_failed'])::int` })
+      .from(chapterPages).where(eq(chapterPages.chapterId, job.chapterId));
+    const [segmentBlockers] = await tx.select({ count: count() }).from(translationSegments).where(and(
+      eq(translationSegments.jobId, id),
+      sql`${translationSegments.qaFlags} ?| array['empty_translation','untranslated_text','malformed_output']`,
+    ));
+    if (pageCheck.missing || pageCheck.critical || segmentBlockers.count) throw new DalError('CONFLICT', 'Critical visual QA failures remain. Re-run the chapter with image cleanup configured and resolve all flagged text before publishing.');
     const [ch] = await tx.update(chapters).set({ status: 'published', publishedAt: new Date() })
       .where(and(eq(chapters.id, job.chapterId), eq(chapters.status, 'in_review')))
       .returning({ id: chapters.id, seriesId: chapters.seriesId, number: chapters.number });

@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, check, index, integer, numeric, pgTable, primaryKey, smallint, text, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, index, integer, jsonb, numeric, pgTable, primaryKey, smallint, text, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
 import { id, timestamps, tstz } from './_shared';
 import { chapterAccess, chapterStatus, seriesStatus } from './enums';
 import { users } from './identity';
@@ -105,6 +105,8 @@ export const chapterPages = pgTable('chapter_pages', {
   sourceKey: text().notNull(),
   /** Object-storage key of the final typeset image (null until processed). */
   outputKey: text(),
+  outputBytes: integer(),
+  visualQaFlags: jsonb().$type<string[]>().notNull().default([]),
   originalFilename: varchar({ length: 512 }),
   contentHash: varchar({ length: 64 }),
   width: integer().notNull(),
