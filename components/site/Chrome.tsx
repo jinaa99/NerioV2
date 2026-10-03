@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useRef, useState, useTransition } from 'react';
 import { Icon, IconButton, useEscape } from '@/components/ui';
-import { GENRES, SERIES, cover } from '@/lib/data';
+import { chapterNo, coverBg } from '@/lib/catalog';
 import { logoutAction } from '@/server/actions/auth';
 import { useSite } from './store';
 
@@ -37,7 +37,7 @@ export function Header() {
 
   const nav: [string, string, boolean][] = [
     ['Home', '/', path === '/'],
-    ['Genres', '/#genres', false],
+    ['Browse', '/browse', path === '/browse'],
     ['Library', '/profile?tab=bookmarks', path === '/profile'],
     ['Premium', '/premium', path === '/premium'],
   ];
@@ -117,11 +117,14 @@ export function TabBar() {
   );
 }
 
-export function SearchOverlay() {
+type SearchHit = { slug: string; title: string; author: string; coverHue: number; coverUrl: string | null; genres: string[]; latestChapter: number | null };
+
+export function SearchOverlay({ genres }: { genres: { slug: string; name: string }[] }) {
   const site = useSite();
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const { open, query, genre } = site.search;
+  const [results, setResults] = useState<{ key: string; items: SearchHit[]; total: number } | null>(null);
   const close = () => site.setSearch({ open: false });
   useEscape(close, open);
 
@@ -134,48 +137,80 @@ export function SearchOverlay() {
     return () => window.removeEventListener('keydown', on);
   }, [site]);
   useEffect(() => { if (open) setTimeout(() => inputRef.current?.focus(), 30); }, [open]);
+
+  // Debounced server search; stale responses are dropped by the abort.
+  const q = query.trim();
+  const key = `${q}|${genre ?? ''}`;
+  useEffect(() => {
+    if (!open) return;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => {
+      const sp = new URLSearchParams();
+      if (q) sp.set('q', q);
+      if (genre) sp.set('genre', genre);
+      fetch(`/api/search?${sp}`, { signal: ctrl.signal })
+        .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+        .then((d: { items: SearchHit[]; total: number }) => setResults({ key, ...d }))
+        .catch(() => { if (!ctrl.signal.aborted) setResults({ key, items: [], total: 0 }); });
+    }, q ? 200 : 0);
+    return () => { clearTimeout(t); ctrl.abort(); };
+  }, [open, q, genre, key]);
   if (!open) return null;
 
-  const q = query.trim().toLowerCase();
   const idle = !q && !genre;
-  const results = idle
-    ? [SERIES[0], SERIES[6], SERIES[2]]
-    : SERIES.filter(s => (!genre || s.genres.includes(genre)) && (!q || `${s.title} ${s.author} ${s.alt} ${s.genres.join(' ')}`.toLowerCase().includes(q)));
+  const loading = results?.key !== key;
+  const items = results?.items ?? [];
+  const browseHref = () => {
+    const sp = new URLSearchParams();
+    if (q) sp.set('q', q);
+    if (genre) sp.set('genre', genre);
+    return `/browse${sp.size ? `?${sp}` : ''}`;
+  };
+  const go = (href: string) => { close(); router.push(href); };
 
   return (
     <div className="search-scrim" onClick={close}>
       <div role="dialog" aria-modal="true" aria-label="Search" className="search-dialog" onClick={e => e.stopPropagation()}>
         <div className="row" style={{ gap: 10, padding: '0 10px 0 16px', height: 60, borderBottom: '1px solid rgba(255,255,255,.08)' }}>
           <Icon name="search" color="var(--ink-3)" />
-          <input ref={inputRef} value={query} onChange={e => site.setSearch({ query: e.target.value })} placeholder="Search series, authors, genres" aria-label="Search"
+          <input ref={inputRef} value={query} onChange={e => site.setSearch({ query: e.target.value })} placeholder="Search series, authors, tags" aria-label="Search"
+            onKeyDown={e => { if (e.key === 'Enter') go(browseHref()); }}
             style={{ flex: 1, minWidth: 0, background: 'none', border: 'none', outline: 'none', color: 'var(--ink-1)', font: '400 17px var(--sans)' }} />
+          {loading && <span className="spinner" />}
           <button type="button" className="btn btn-ghost" style={{ '--h': '36px', '--px': '10px', '--fs': '13px' } as React.CSSProperties} onClick={close}>
             <span className="mobile-only">Cancel</span><span className="not-mobile">Esc</span>
           </button>
         </div>
-        <div className="row" style={{ gap: 6, padding: '12px 16px', overflowX: 'auto', scrollbarWidth: 'none', borderBottom: '1px solid rgba(255,255,255,.06)' }}>
-          {GENRES.slice(0, 9).map(([name]) => (
-            <button key={name} type="button" aria-pressed={genre === name} className="genre-chip" onClick={() => site.setSearch({ genre: genre === name ? null : name })}>{name}</button>
-          ))}
-        </div>
-        <div style={{ overflowY: 'auto', padding: 8, flex: 1 }}>
-          {idle && <div className="kicker" style={{ padding: '8px 10px 4px' }}>Recent</div>}
-          {results.map(s => (
-            <button key={s.id} type="button" className="row-btn" style={{ padding: 10, borderRadius: 12 }} onClick={() => { close(); router.push(`/series/${s.id}`); }}>
-              <div style={{ width: 44, flex: 'none', aspectRatio: '3/4', borderRadius: 6, background: cover(s.hue) }} />
-              <div className="stack grow" style={{ gap: 3 }}>
-                <span style={{ font: '600 15px var(--sans)' }}>{s.title}</span>
-                <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>{s.author} · {s.genres.join(' · ')}</span>
+        {genres.length > 0 && (
+          <div className="row" style={{ gap: 6, padding: '12px 16px', overflowX: 'auto', scrollbarWidth: 'none', borderBottom: '1px solid rgba(255,255,255,.06)' }}>
+            {genres.map(g => (
+              <button key={g.slug} type="button" aria-pressed={genre === g.slug} className="genre-chip" onClick={() => site.setSearch({ genre: genre === g.slug ? null : g.slug })}>{g.name}</button>
+            ))}
+          </div>
+        )}
+        <div style={{ overflowY: 'auto', padding: 8, flex: 1, opacity: loading && results ? .6 : 1, transition: 'opacity .15s' }}>
+          {idle && <div className="kicker" style={{ padding: '8px 10px 4px' }}>Recently updated</div>}
+          {items.map(s => (
+            <button key={s.slug} type="button" className="row-btn" style={{ padding: 10, borderRadius: 12 }} onClick={() => go(`/series/${s.slug}`)}>
+              <div style={{ width: 44, flex: 'none', aspectRatio: '3/4', borderRadius: 6, background: coverBg(s.coverHue, s.coverUrl) }} />
+              <div className="stack grow" style={{ gap: 3, minWidth: 0 }}>
+                <span className="ellipsis" style={{ font: '600 15px var(--sans)' }}>{s.title}</span>
+                <span className="ellipsis" style={{ fontSize: 13, color: 'var(--ink-3)' }}>{[s.author, ...s.genres].join(' · ')}</span>
               </div>
-              <span className="meta" style={{ color: 'var(--ink-2)' }}>CH. {s.ch - s.early}</span>
+              {s.latestChapter !== null && <span className="meta" style={{ color: 'var(--ink-2)' }}>CH. {chapterNo(s.latestChapter)}</span>}
             </button>
           ))}
-          {results.length === 0 && (
+          {!loading && results && items.length === 0 && (
             <div className="stack" style={{ alignItems: 'center', textAlign: 'center', gap: 8, padding: '40px 16px' }}>
               <Icon name="search_off" size={30} color="var(--ink-3)" />
-              <span style={{ font: '400 22px var(--serif)' }}>Nothing for “{query}”</span>
+              <span style={{ font: '400 22px var(--serif)' }}>{q ? `Nothing for “${q}”` : 'Nothing here yet'}</span>
               <span style={{ fontSize: 14, color: 'var(--ink-3)' }}>Try a shorter title, an author name, or clear the genre filter.</span>
             </div>
+          )}
+          {!idle && results && results.total > items.length && (
+            <button type="button" className="row-btn" style={{ padding: '12px 10px', borderRadius: 12, justifyContent: 'center', color: 'var(--ember-text)', font: '600 14px var(--sans)', gap: 4 }} onClick={() => go(browseHref())}>
+              See all {results.total} results<Icon name="arrow_forward" size={18} />
+            </button>
           )}
         </div>
       </div>
@@ -185,7 +220,7 @@ export function SearchOverlay() {
 
 export function Footer() {
   const cols: [string, [string, string][]][] = [
-    ['Discover', [['Trending', '/'], ['New releases', '/'], ['Genres', '/#genres']]],
+    ['Discover', [['Browse', '/browse'], ['New releases', '/browse?sort=new'], ['Genres', '/#genres']]],
     ['Account', [['Library', '/profile?tab=bookmarks'], ['Premium', '/premium'], ['Settings', '/profile?tab=settings']]],
     ['Nerio', [['About', '/'], ['Report an issue', '/'], ['Terms & privacy', '/']]],
   ];

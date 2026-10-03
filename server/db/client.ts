@@ -19,6 +19,10 @@ export function db(): Database {
     max: env.DATABASE_POOL_MAX,
     // Transaction-mode poolers (PgBouncer, Supabase, Neon) don't support prepared statements.
     prepare: false,
+    // Close idle sockets before managed poolers/NATs silently drop them (a dropped socket hangs until ETIMEDOUT).
+    idle_timeout: 20,
+    max_lifetime: 60 * 30,
+    connect_timeout: 15,
   });
   const instance = drizzle(client, { schema, casing: 'snake_case' });
   globalForDb.nerioDb = instance;

@@ -8,13 +8,15 @@ export const series = pgTable('series', {
   id: id(),
   slug: varchar({ length: 96 }).notNull().unique(),
   title: varchar({ length: 200 }).notNull(),
-  altTitle: varchar({ length: 300 }),
+  /** Alternative/native titles, most prominent first. */
+  altTitles: varchar({ length: 300 }).array().notNull().default(sql`'{}'::varchar[]`),
   description: text().notNull().default(''),
   author: varchar({ length: 120 }).notNull(),
   artist: varchar({ length: 120 }),
   status: seriesStatus().notNull().default('draft'),
   /** BCP-47 language of the source material, e.g. `ko`. */
   sourceLanguage: varchar({ length: 16 }).notNull().default('ko'),
+  /** Cover image: an `https://` URL or an object-storage key (resolved by server/storage.ts). */
   coverKey: text(),
   /** OKLCH hue used for generated covers/backdrops (see lib/data.ts `cover`). */
   coverHue: smallint().notNull().default(40),
@@ -30,6 +32,9 @@ export const series = pgTable('series', {
 }, t => [
   index('series_status_published_idx').on(t.status, t.publishedAt),
   index('series_views_idx').on(t.viewCount),
+  // Trigram indexes keep `ilike '%term%'` search fast (needs the pg_trgm extension).
+  index('series_title_trgm_idx').using('gin', sql`${t.title} gin_trgm_ops`),
+  index('series_author_trgm_idx').using('gin', sql`${t.author} gin_trgm_ops`),
   check('series_slug_format', sql`${t.slug} ~ '^[a-z0-9]+(-[a-z0-9]+)*$'`),
   check('series_cover_hue_range', sql`${t.coverHue} between 0 and 360`),
   check('series_rating_range', sql`${t.ratingAvg} between 0 and 5`),
@@ -51,6 +56,23 @@ export const seriesGenres = pgTable('series_genres', {
 }, t => [
   primaryKey({ columns: [t.seriesId, t.genreId] }),
   index('series_genres_genre_idx').on(t.genreId),
+]);
+
+/** Free-form descriptors ("Regression", "Villainess"), finer-grained than genres. */
+export const tags = pgTable('tags', {
+  id: id(),
+  slug: varchar({ length: 64 }).notNull().unique(),
+  name: varchar({ length: 64 }).notNull().unique(),
+  ...timestamps(),
+});
+
+export const seriesTags = pgTable('series_tags', {
+  seriesId: uuid().notNull().references(() => series.id, { onDelete: 'cascade' }),
+  tagId: uuid().notNull().references(() => tags.id, { onDelete: 'cascade' }),
+  position: smallint().notNull().default(0),
+}, t => [
+  primaryKey({ columns: [t.seriesId, t.tagId] }),
+  index('series_tags_tag_idx').on(t.tagId),
 ]);
 
 export const chapters = pgTable('chapters', {
@@ -79,7 +101,7 @@ export const chapterPages = pgTable('chapter_pages', {
   id: id(),
   chapterId: uuid().notNull().references(() => chapters.id, { onDelete: 'cascade' }),
   pageNumber: integer().notNull(),
-  /** Object-storage key of the original upload. Never expose raw keys; sign URLs server-side. */
+  /** Original image: an `https://` URL or an object-storage key (resolved by server/storage.ts). */
   sourceKey: text().notNull(),
   /** Object-storage key of the final typeset image (null until processed). */
   outputKey: text(),

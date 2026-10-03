@@ -3,7 +3,7 @@ import { bookmarks, follows, notifications, readingHistory, readingProgress } fr
 import { adminAuditLogs } from './audit';
 import { oauthAccounts, sessions } from './auth';
 import { paymentRecords } from './billing';
-import { chapterPages, chapters, characters, genres, glossaryTerms, series, seriesGenres } from './catalog';
+import { chapterPages, chapters, characters, genres, glossaryTerms, series, seriesGenres, seriesTags, tags } from './catalog';
 import { profiles, roles, userRoles, users } from './identity';
 import { translationJobs, translationSegments } from './translation';
 
@@ -43,6 +43,7 @@ export const userRolesRelations = relations(userRoles, ({ one }) => ({
 
 export const seriesRelations = relations(series, ({ many }) => ({
   genres: many(seriesGenres),
+  tags: many(seriesTags),
   chapters: many(chapters),
   glossary: many(glossaryTerms),
   characters: many(characters),
@@ -55,6 +56,15 @@ export const genresRelations = relations(genres, ({ many }) => ({
 export const seriesGenresRelations = relations(seriesGenres, ({ one }) => ({
   series: one(series, { fields: [seriesGenres.seriesId], references: [series.id] }),
   genre: one(genres, { fields: [seriesGenres.genreId], references: [genres.id] }),
+}));
+
+export const tagsRelations = relations(tags, ({ many }) => ({
+  series: many(seriesTags),
+}));
+
+export const seriesTagsRelations = relations(seriesTags, ({ one }) => ({
+  series: one(series, { fields: [seriesTags.seriesId], references: [series.id] }),
+  tag: one(tags, { fields: [seriesTags.tagId], references: [tags.id] }),
 }));
 
 export const chaptersRelations = relations(chapters, ({ one, many }) => ({

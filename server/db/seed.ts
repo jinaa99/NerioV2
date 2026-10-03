@@ -35,7 +35,7 @@ async function main() {
 
   for (const s of SERIES) {
     const [row] = await db.insert(schema.series).values({
-      slug: s.id, title: s.title, altTitle: s.alt, description: s.desc, author: s.author, artist: s.artist,
+      slug: s.id, title: s.title, altTitles: [s.alt], description: s.desc, author: s.author, artist: s.artist,
       status: s.status.toLowerCase() as 'ongoing' | 'completed' | 'hiatus' | 'draft',
       coverHue: s.hue, ratingAvg: s.rating, ratingCount: parseCount(s.votes),
       viewCount: parseCount(s.reads), followerCount: parseCount(s.followers), publishedAt: new Date(),

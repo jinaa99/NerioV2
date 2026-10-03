@@ -2,7 +2,6 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ToastViewport, useToastQueue, type PushToast } from '@/components/ui';
-import { getSeries, type Series } from '@/lib/data';
 import type { ViewerDTO } from '@/server/auth/guards';
 
 export type PayState = 'info' | 'pending' | 'confirmed';
@@ -25,8 +24,8 @@ type Persisted = {
 };
 
 const DEFAULTS: Persisted = {
-  bm: { lantern: true, ninth: true, glass: true, bloom: true },
-  follow: { lantern: true, ninth: true, glass: false, bloom: true, orchard: true },
+  bm: {},
+  follow: {},
   prefs: [true, true, false, true],
   pay: 'info',
   plan: 0,
@@ -41,8 +40,8 @@ type SiteCtx = Persisted & {
   premium: boolean;
   set: (patch: Partial<Persisted> | ((s: Persisted) => Partial<Persisted>)) => void;
   setReader: (patch: Partial<ReaderPrefs>) => void;
-  toggleBookmark: (id: string) => void;
-  isLocked: (s: Series, n: number) => boolean;
+  /** Keyed by series slug. */
+  toggleBookmark: (slug: string, title: string) => void;
   toast: PushToast;
   toastBottom: string | undefined;
   setToastBottom: (v: string | undefined) => void;
@@ -84,10 +83,9 @@ export function SiteProvider({ viewer, children }: { viewer: ViewerDTO | null; c
   const set: SiteCtx['set'] = useCallback(patch => setState(s => ({ ...s, ...(typeof patch === 'function' ? patch(s) : patch) })), []);
   const setReader = useCallback((patch: Partial<ReaderPrefs>) => setState(s => ({ ...s, reader: { ...s.reader, ...patch } })), []);
 
-  const toggleBookmark = useCallback((id: string) => {
+  const toggleBookmark = useCallback((id: string, title: string) => {
     const on = !stateRef.current.bm[id];
     setState(s => ({ ...s, bm: { ...s.bm, [id]: on } }));
-    const title = getSeries(id)?.title ?? 'Series';
     push(
       on ? `${title} added to your library` : `${title} removed`,
       on ? 'bookmark_added' : 'bookmark_remove',
@@ -97,13 +95,12 @@ export function SiteProvider({ viewer, children }: { viewer: ViewerDTO | null; c
   }, [push]);
 
   const premium = !!viewer?.premium || state.pay === 'confirmed';
-  const isLocked = useCallback((s: Series, n: number) => !premium && n > s.ch - s.early, [premium]);
   const setSearch = useCallback((patch: Partial<SiteCtx['search']>) => setSearchState(s => ({ ...s, ...patch })), []);
   const openSearch = useCallback((genre?: string | null) => setSearchState(s => ({ open: true, query: genre !== undefined ? '' : s.query, genre: genre !== undefined ? genre : s.genre })), []);
 
   const value = useMemo<SiteCtx>(() => ({
-    ...state, viewer, premium, set, setReader, toggleBookmark, isLocked, toast: push, toastBottom, setToastBottom, search, openSearch, setSearch,
-  }), [state, viewer, premium, set, setReader, toggleBookmark, isLocked, push, toastBottom, search, openSearch, setSearch]);
+    ...state, viewer, premium, set, setReader, toggleBookmark, toast: push, toastBottom, setToastBottom, search, openSearch, setSearch,
+  }), [state, viewer, premium, set, setReader, toggleBookmark, push, toastBottom, search, openSearch, setSearch]);
 
   return (
     <Ctx.Provider value={value}>

@@ -13,24 +13,36 @@ npm run build
 | Route | Screen |
 | --- | --- |
 | `/` | Home: hero carousel, continue reading, trending, updates, genres |
-| `/series/[id]` | Series detail and chapter list |
+| `/browse` | Catalog: search, genre/status filters, sort, pagination (`?q=&genre=&status=&sort=&page=`) |
+| `/series/[id]` | Series detail and chapter list (`id` is the series slug) |
 | `/read/[id]/[ch]` | Reader (shortcuts: ← → J K F S C H ? Esc) |
 | `/profile?tab=…` | Overview, bookmarks, history, following, achievements, settings |
 | `/premium` | Bank-transfer Premium flow (info → pending → confirmed) |
 | `/login`, `/register` | Sign in and create an account (`?next=` returns you to the page you came from) |
 | `/admin/*` | Overview, series, chapters, upload, queue, review, processing, users, reports, settings |
+| `/admin/series/new`, `/admin/series/[id]` | Series editor: title, slug, alternative titles, description, author, artist, status, genres, tags, cover |
+| `/admin/chapters?series=…`, `/admin/chapters/new`, `/admin/chapters/[id]` | Chapter list and editor: number, title, access, draft/published, publication date (future = scheduled), pages |
 | `/design-system` | Tokens and component reference |
 | `/breakpoints` | Live iframes of key screens at common widths |
 
 ## Structure
 
-- `lib/data.ts`, `lib/admin-data.ts`: mock content (stand-ins for a real API).
+- `lib/catalog.ts`: client-safe display helpers for catalog DTOs (covers, status labels, number/time formatting).
+- `lib/data.ts`, `lib/admin-data.ts`: mock content still used by screens without a backend yet (profile, premium, upload/processing pipeline, users, reports).
 - `components/ui.tsx`: shared primitives (Button, IconButton, Cover, Segmented, Switch, toasts).
 - `components/site/*`: reader site; `store.tsx` holds bookmarks, payment and reader prefs, persisted to `localStorage`.
 - `components/admin/*`: admin screens; `store.tsx` simulates workers, the upload pipeline and review state.
 - `app/globals.css`: design tokens and shared classes. Area styles are in `app/(site)/site.css` and `app/admin/admin.css`.
 
-The UI still reads mock data from `lib/`. The database layer below is in place but not wired into the screens yet.
+Home, browse, search, series pages, the reader and the admin series/chapter screens read the database. The remaining screens still use mock data from `lib/`.
+
+### Content
+
+- **Images:** `series.cover_key` and `chapter_pages.source_key` hold either a public `https://` URL (entered in the admin) or an object-storage key. `server/storage.ts` resolves them; storage keys resolve to nothing until object storage is added, and the UI falls back to the generated cover / an empty page slot.
+- **Pages:** editors paste image URLs (one per line); the browser reads each image's size before saving. Pages can be reordered (drag or arrows, then *Save order*) and removed; page numbers are rewritten atomically.
+- **Publishing:** a chapter is visible when `status = 'published'` and `published_at <= now()`, so a future date schedules it. Followers are notified when a chapter first goes live (scheduled chapters notify at save time only if already due).
+- **Search:** title, author, artist, alternative titles and tag names, case-insensitive (`pg_trgm` indexes on title and author). `/api/search` serves the search overlay; `/api/series/[slug]/chapters` pages the chapter list.
+- **Series deletion** is a soft delete (`deleted_at`); chapter and page deletion are hard deletes.
 
 ## Backend
 
@@ -60,7 +72,7 @@ Every `server/` module imports `server-only`, so importing one from a Client Com
 
 ### Tables
 
-`users`, `profiles` (1:1), `roles` + `user_roles`; `series`, `genres` + `series_genres`, `chapters`, `chapter_pages`; `reading_progress` (one row per user and series), `reading_history` (one row per user and chapter), `bookmarks`, `follows`, `notifications`; `translation_jobs`, `translation_segments`, `glossary_terms`, `characters`; `payment_records`; `admin_audit_logs` (append-only).
+`users`, `profiles` (1:1), `roles` + `user_roles`; `series`, `genres` + `series_genres`, `tags` + `series_tags`, `chapters`, `chapter_pages`; `reading_progress` (one row per user and series), `reading_history` (one row per user and chapter), `bookmarks`, `follows`, `notifications`; `translation_jobs`, `translation_segments`, `glossary_terms`, `characters`; `payment_records`; `admin_audit_logs` (append-only).
 
 Conventions:
 

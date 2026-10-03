@@ -1,19 +1,22 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
+import { cache } from 'react';
 import SeriesDetail from '@/components/site/SeriesDetail';
-import { SERIES, getSeries } from '@/lib/data';
+import { getSeriesBySlug, listSeries } from '@/server/data/catalog';
 
-export function generateStaticParams() {
-  return SERIES.map(s => ({ id: s.id }));
-}
+// Shared by generateMetadata and the page within one request.
+const getSeries = cache(getSeriesBySlug);
 
 export async function generateMetadata({ params }: PageProps<'/series/[id]'>): Promise<Metadata> {
-  const s = getSeries((await params).id);
-  return s ? { title: s.title, description: s.desc } : {};
+  const s = await getSeries((await params).id);
+  return s ? { title: s.title, description: s.description.slice(0, 300) || undefined } : {};
 }
 
 export default async function Page({ params }: PageProps<'/series/[id]'>) {
-  const { id } = await params;
-  if (!getSeries(id)) notFound();
-  return <SeriesDetail id={id} />;
+  const s = await getSeries((await params).id);
+  if (!s) notFound();
+  const similar = s.genres[0]
+    ? (await listSeries({ genre: s.genres[0].slug, excludeId: s.id, sort: 'popular', limit: 6 })).items
+    : [];
+  return <SeriesDetail key={s.id} s={s} similar={similar} />;
 }

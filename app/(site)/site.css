@@ -54,11 +54,6 @@
   .search-scrim { padding: 0; }
   .search-dialog { border-radius: 0; }
 }
-.genre-chip {
-  flex: none; height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .14);
-  background: transparent; color: var(--ink-2); font: 500 13px var(--sans); cursor: pointer; transition: all .15s;
-}
-.genre-chip[aria-pressed='true'] { background: var(--ink-1); color: var(--bg); border-color: var(--ink-1); }
 
 /* Home */
 .hero { position: relative; border-radius: clamp(16px, 2vw, 24px); overflow: hidden; min-height: clamp(440px, 52vw, 600px); display: flex; align-items: flex-end; transition: background .6s ease; }

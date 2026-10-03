@@ -153,6 +153,13 @@ select.input { padding: 0 10px; font-weight: 500; }
   padding: 0 12px; color: var(--ink-3);
 }
 .searchbox input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: var(--ink-1); font: 400 15px var(--sans); }
+/* Genre/filter chips: reader search and the admin series editor. */
+.genre-chip {
+  flex: none; height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .14);
+  background: transparent; color: var(--ink-2); font: 500 13px var(--sans); cursor: pointer; transition: all .15s;
+}
+.genre-chip[aria-pressed='true'] { background: var(--ink-1); color: var(--bg); border-color: var(--ink-1); }
+.genre-chip:hover:not([aria-pressed='true']) { border-color: rgba(255, 255, 255, .3); color: var(--ink-1); }
 .field { display: flex; flex-direction: column; gap: 8px; }
 .field > .label { font: 500 13px var(--sans); }
 .kbd { font: 500 11px var(--mono); padding: 2px 6px; border-radius: 5px; border: 1px solid var(--line-2); }

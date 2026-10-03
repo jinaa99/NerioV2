@@ -139,7 +139,7 @@ export default function Profile({ account }: { account: Account }) {
                       </div>
                     </Cover>
                   </Link>
-                  <button type="button" className="bm-fab" aria-label="Remove bookmark" onClick={() => site.toggleBookmark(s.id)}><Icon name="bookmark" fill size={18} color="var(--ember)" /></button>
+                  <button type="button" className="bm-fab" aria-label="Remove bookmark" onClick={() => site.toggleBookmark(s.id, s.title)}><Icon name="bookmark" fill size={18} color="var(--ember)" /></button>
                   <span style={{ font: '600 14px/1.3 var(--sans)' }}>{s.title}</span>
                   <span className="meta">{read} / {s.ch} READ</span>
                 </div>

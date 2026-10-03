@@ -77,41 +77,107 @@ export const safeNextPath = (value: unknown): string => {
 
 export const seriesStatus = z.enum(['draft', 'ongoing', 'completed', 'hiatus']);
 
+/** Public https image URL, normalized so it is safe to embed in CSS `url("…")`. */
+export const imageUrl = z.url({ protocol: /^https$/, error: 'Use an https:// image URL' }).max(1000).transform(u => new URL(u).href);
+
+/** Genre/tag names: trimmed, de-duplicated (case-insensitive), order kept. */
+const labelList = (max: number) => z.array(z.string().trim().min(1).max(64)).max(max)
+  .transform(list => list.filter((v, i) => list.findIndex(x => x.toLowerCase() === v.toLowerCase()) === i));
+
+export const toSlug = (s: string) => s.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 96);
+
 export const createSeriesInput = z.object({
   slug,
-  title: z.string().trim().min(1).max(200),
-  altTitle: z.string().trim().max(300).nullish(),
+  title: z.string().trim().min(1, 'Enter a title').max(200),
+  altTitles: z.array(z.string().trim().min(1).max(300)).max(10).default([]),
   description: z.string().trim().max(5000).default(''),
-  author: z.string().trim().min(1).max(120),
-  artist: z.string().trim().max(120).nullish(),
+  author: z.string().trim().min(1, 'Enter the author').max(120),
+  artist: z.string().trim().max(120).nullish().transform(v => v || null),
   status: seriesStatus.default('draft'),
   sourceLanguage: languageTag.default('ko'),
   coverHue: hue.default(40),
-  genreSlugs: z.array(slug).max(8).default([]),
+  coverUrl: imageUrl.nullish(),
+  genres: labelList(8).default([]),
+  tags: labelList(20).default([]),
 }).strict();
 export type CreateSeriesInput = z.input<typeof createSeriesInput>;
 
-export const updateSeriesInput = createSeriesInput.omit({ slug: true }).partial().strict();
+/** Full replace: the editor always submits every field (zod 4 `.partial()` would re-apply defaults). */
+export const updateSeriesInput = createSeriesInput;
 export type UpdateSeriesInput = z.input<typeof updateSeriesInput>;
+
+export const seriesSort = z.enum(['popular', 'updated', 'new', 'rating', 'title']);
 
 export const listSeriesInput = pagination.extend({
   genre: slug.optional(),
   status: z.enum(['ongoing', 'completed', 'hiatus']).optional(),
-  sort: z.enum(['popular', 'updated', 'new']).default('popular'),
+  sort: seriesSort.default('popular'),
   q: z.string().trim().max(100).optional(),
+  excludeId: uuid.optional(),
 });
 export type ListSeriesInput = z.input<typeof listSeriesInput>;
 
-export const chapterNumber = z.number().min(0).max(99_999.99).multipleOf(0.01);
+export const adminListSeriesInput = pagination.extend({
+  status: seriesStatus.optional(),
+  q: z.string().trim().max(100).optional(),
+});
+export type AdminListSeriesInput = z.input<typeof adminListSeriesInput>;
 
-export const createChapterInput = z.object({
-  seriesId: uuid,
+export const chapterNumber = z.number().min(0).max(99_999.99).multipleOf(0.01);
+/** Editors only toggle draft/published; the other states belong to the (future) processing pipeline. */
+export const chapterPublishState = z.enum(['draft', 'published']);
+
+const chapterFields = {
   number: chapterNumber,
-  title: z.string().trim().max(200).nullish(),
+  title: z.string().trim().max(200).nullish().transform(v => v || null),
   access: z.enum(['free', 'early_access']).default('free'),
   freeAt: z.coerce.date().nullish(),
-}).strict().refine(v => v.access === 'free' || v.freeAt, { message: 'Early-access chapters need a free date', path: ['freeAt'] });
+  status: chapterPublishState.default('draft'),
+  /** When the chapter goes live. A future date schedules it; null with `published` means now. */
+  publishedAt: z.coerce.date().nullish(),
+};
+const earlyAccessNeedsDate = (v: { access?: string; freeAt?: Date | null }) => v.access !== 'early_access' || !!v.freeAt;
+
+export const createChapterInput = z.object({ seriesId: uuid, ...chapterFields }).strict()
+  .refine(earlyAccessNeedsDate, { message: 'Early-access chapters need a free date', path: ['freeAt'] });
 export type CreateChapterInput = z.input<typeof createChapterInput>;
+
+export const updateChapterInput = z.object(chapterFields).strict()
+  .refine(earlyAccessNeedsDate, { message: 'Early-access chapters need a free date', path: ['freeAt'] });
+export type UpdateChapterInput = z.input<typeof updateChapterInput>;
+
+export const adminListChaptersInput = pagination.extend({
+  seriesId: uuid,
+  status: z.enum(['published', 'scheduled', 'draft', 'pipeline']).optional(),
+});
+export type AdminListChaptersInput = z.input<typeof adminListChaptersInput>;
+
+export const publicChaptersInput = z.object({
+  limit: z.number().int().min(1).max(100).default(50),
+  offset: z.number().int().min(0).max(100_000).default(0),
+  order: z.enum(['asc', 'desc']).default('desc'),
+  q: z.string().trim().max(100).optional(),
+  /** Only chapters after this number (the "Unread" filter). */
+  after: z.number().min(0).optional(),
+});
+export type PublicChaptersInput = z.input<typeof publicChaptersInput>;
+
+export const addPagesInput = z.object({
+  chapterId: uuid,
+  pages: z.array(z.object({
+    url: imageUrl,
+    width: z.number().int().min(1).max(20_000),
+    height: z.number().int().min(1).max(100_000),
+  }).strict()).min(1).max(300),
+}).strict();
+export type AddPagesInput = z.input<typeof addPagesInput>;
+
+export const reorderPagesInput = z.object({
+  chapterId: uuid,
+  /** Every page id of the chapter, in the new reading order. */
+  pageIds: z.array(uuid).min(1).max(2000).refine(ids => new Set(ids).size === ids.length, 'Duplicate page'),
+}).strict();
+export type ReorderPagesInput = z.input<typeof reorderPagesInput>;
 
 /* Reading */
 
