@@ -17,6 +17,8 @@ export async function POST(request: Request) {
   let actor;
   try { actor = await requireRole('editor'); }
   catch (error) { const e = error as { code?: string; message?: string }; return jsonError(e.code === 'UNAUTHENTICATED' ? 'Sign in to upload chapters.' : 'You do not have permission to upload chapters.', e.code === 'UNAUTHENTICATED' ? 401 : 403, e.code ?? 'FORBIDDEN'); }
+  const origin = request.headers.get('origin');
+  if (!origin || origin !== new URL(request.url).origin) return jsonError('Upload origin is not allowed.', 403, 'invalid_origin');
   const length = Number(request.headers.get('content-length') ?? 0);
   if (length > serverEnv().CHAPTER_ZIP_MAX_BYTES + 1_000_000) return jsonError('ZIP file exceeds the upload size limit.', 413, 'zip_too_large');
   if (!request.body) return jsonError('Upload body is missing.', 400, 'invalid_upload');
@@ -45,8 +47,6 @@ export async function POST(request: Request) {
   if (!(file instanceof File)) return jsonError('Choose a ZIP file to upload.', 400, 'missing_file');
   if (!/^[0-9a-f-]{36}$/i.test(seriesId) || !Number.isFinite(number) || number < 0 || number > 99999) return jsonError('Choose a valid series and chapter number.', 400, 'invalid_chapter');
   if (file.size > serverEnv().CHAPTER_ZIP_MAX_BYTES) return jsonError('ZIP file exceeds the upload size limit.', 413, 'zip_too_large');
-  const origin = request.headers.get('origin');
-  if (!origin || origin !== new URL(request.url).origin) return jsonError('Upload origin is not allowed.', 403, 'invalid_origin');
   const zipData = Buffer.from(await file.arrayBuffer());
   let pages;
   try { pages = await inspectChapterZip(zipData, file.name, file.type); }

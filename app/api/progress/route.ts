@@ -11,16 +11,28 @@ export async function POST(request: NextRequest) {
   // Same check Next.js applies to Server Actions: Origin host must match the (forwarded) host.
   const origin = request.headers.get('origin');
   const host = request.headers.get('x-forwarded-host') ?? request.headers.get('host');
-  if (origin) {
-    let originHost = '';
-    try { originHost = new URL(origin).host; } catch {}
-    if (originHost !== host) return new Response(null, { status: 403 });
-  }
+  let originHost = '';
+  try { originHost = origin ? new URL(origin).host : ''; } catch {}
+  if (!originHost || !host || originHost !== host) return new Response(null, { status: 403 });
   if (Number(request.headers.get('content-length') ?? 0) > 1024) return new Response(null, { status: 413 });
 
   let body: unknown;
   try {
-    body = JSON.parse(await request.text());
+    if (!request.body) return Response.json({ error: 'Invalid JSON' }, { status: 400 });
+    const reader = request.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 1024) {
+        await reader.cancel();
+        return new Response(null, { status: 413 });
+      }
+      chunks.push(value);
+    }
+    body = JSON.parse(Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).toString('utf8'));
   } catch {
     return Response.json({ error: 'Invalid JSON' }, { status: 400 });
   }

@@ -13,10 +13,11 @@ export async function saveProgress(input: SaveProgressInput) {
   const actor = await requireActor();
   const data = parseInput(saveProgressInput, input);
   const [ch] = await db()
-    .select({ seriesId: chapters.seriesId })
+    .select({ seriesId: chapters.seriesId, pageCount: chapters.pageCount })
     .from(chapters)
     .where(and(eq(chapters.id, data.chapterId), eq(chapters.status, 'published'), lte(chapters.publishedAt, sql`now()`)));
   if (!ch) throw new DalError('NOT_FOUND', 'Chapter not found.');
+  if (data.pageNumber > ch.pageCount) throw new DalError('INVALID_INPUT', 'Page number is outside this chapter.');
 
   const now = new Date();
   await db().transaction(async tx => {
