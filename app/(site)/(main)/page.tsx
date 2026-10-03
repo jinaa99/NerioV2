@@ -11,7 +11,7 @@ export default async function Page() {
     listSeries({ sort: 'updated', limit: 6 }),
     listSeries({ sort: 'new', limit: 12 }),
     listGenres(),
-    actor ? listContinueReading({ limit: 4 }) : Promise.resolve([]),
+    actor ? listContinueReading({ limit: 4 }).then(r => r.items) : Promise.resolve([]),
   ]);
   const recent = await latestChapters(updated.items.map(s => s.id), 2);
   const featured = popular.items.slice(0, 3);

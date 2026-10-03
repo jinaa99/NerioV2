@@ -16,7 +16,7 @@ npm run build
 | `/browse` | Catalog: search, genre/status filters, sort, pagination (`?q=&genre=&status=&sort=&page=`) |
 | `/series/[id]` | Series detail and chapter list (`id` is the series slug) |
 | `/read/[id]/[ch]` | Reader (shortcuts: ← → J K Space F S C H ? Esc) |
-| `/profile?tab=…` | Overview, bookmarks, history, following, achievements, settings |
+| `/profile?tab=…` | Overview, bookmarks, history, following, notifications, achievements, settings (`&page=N` on list tabs) |
 | `/premium` | Bank-transfer Premium flow (info → pending → confirmed) |
 | `/login`, `/register` | Sign in and create an account (`?next=` returns you to the page you came from) |
 | `/admin/*` | Overview, series, chapters, upload, queue, review, processing, users, reports, settings |
@@ -28,9 +28,9 @@ npm run build
 ## Structure
 
 - `lib/catalog.ts`: client-safe display helpers for catalog DTOs (covers, status labels, number/time formatting).
-- `lib/data.ts`, `lib/admin-data.ts`: mock content still used by screens without a backend yet (profile, premium, upload/processing pipeline, users, reports).
+- `lib/data.ts`, `lib/admin-data.ts`: mock content still used by screens without a backend yet (premium, upload/processing pipeline, users, reports).
 - `components/ui.tsx`: shared primitives (Button, IconButton, Cover, Segmented, Switch, toasts).
-- `components/site/*`: reader site; `store.tsx` holds bookmarks, payment and reader prefs, persisted to `localStorage`.
+- `components/site/*`: reader site; `store.tsx` holds the signed-in viewer, optimistic bookmark state, reader prefs and the (still mock) Premium payment flow.
 - `components/admin/*`: admin screens; `store.tsx` simulates workers, the upload pipeline and review state.
 - `app/globals.css`: design tokens and shared classes. Area styles are in `app/(site)/site.css` and `app/admin/admin.css`.
 
@@ -44,6 +44,7 @@ Home, browse, search, series pages, the reader and the admin series/chapter scre
 - **Search:** title, author, artist, alternative titles and tag names, case-insensitive (`pg_trgm` indexes on title and author). `/api/search` serves the search overlay; `/api/series/[slug]/chapters` pages the chapter list.
 - **Reader:** pages render as boxes with each image's exact aspect ratio, so nothing shifts while images arrive. Only the page under the reader, one page above and a lookahead below are loaded (4 pages; 2 on 3G, 1 with Save-Data/2G). Images are the uploaded originals (no recompression). Near the end of a chapter the next chapter's route and first two images are prefetched. Failed images retry twice with backoff, then offer a manual retry; errored pages also retry when the browser comes back online.
 - **Reading progress:** saved per user and series (`reading_progress`: page, position within the page in ‰, percent) via `POST /api/progress`, debounced (2 s idle, at most every 15 s) and flushed with `sendBeacon` when the tab hides or closes. Reopening a chapter resumes at the saved position; signed-out readers resume from `localStorage`. Finished chapters reopen at the top.
+- **Library:** bookmarks, follows (with per-series alert toggle), reading history, continue reading, notifications and the profile stats are read from the database by `server/data/library.ts`, `reading.ts` and `notifications.ts`. Every function scopes to the session's user (no user-id parameters), and mutations go through `server/actions/library.ts`. The profile page loads only the active tab, paginated. Achievements are derived from the same counts. Reader settings (width, gap, background, auto-hide) sync to `profiles.reader_settings`; signed-out readers keep them in `localStorage`.
 - **Series deletion** is a soft delete (`deleted_at`); chapter and page deletion are hard deletes.
 
 ## Backend

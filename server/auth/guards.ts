@@ -1,9 +1,10 @@
 import 'server-only';
-import { eq } from 'drizzle-orm';
+import { and, count, eq, isNull } from 'drizzle-orm';
 import { notFound, redirect } from 'next/navigation';
 import { cache } from 'react';
 import { db } from '../db/client';
-import { profiles } from '../db/schema';
+import { notifications, profiles } from '../db/schema';
+import type { ReaderSettings } from '../db/schema/identity';
 import { getCurrentActor, hasRole, type Actor } from './actor';
 
 /** What the UI may know about the signed-in user. Safe to pass to Client Components. */
@@ -14,6 +15,9 @@ export type ViewerDTO = {
   premium: boolean;
   isAdmin: boolean;
   memberSince: string;
+  unreadNotifications: number;
+  /** Synced reader preferences (width, gap, background, auto-hide). */
+  readerSettings: ReaderSettings;
 };
 
 const initialsOf = (name: string) =>
@@ -22,10 +26,14 @@ const initialsOf = (name: string) =>
 export const getViewer = cache(async (): Promise<ViewerDTO | null> => {
   const actor = await getCurrentActor();
   if (!actor) return null;
-  const [p] = await db()
-    .select({ displayName: profiles.displayName, username: profiles.username, premiumUntil: profiles.premiumUntil, createdAt: profiles.createdAt })
-    .from(profiles)
-    .where(eq(profiles.userId, actor.userId));
+  const [[p], [unread]] = await Promise.all([
+    db()
+      .select({ displayName: profiles.displayName, username: profiles.username, premiumUntil: profiles.premiumUntil, createdAt: profiles.createdAt, readerSettings: profiles.readerSettings })
+      .from(profiles)
+      .where(eq(profiles.userId, actor.userId)),
+    // Served by the partial index notifications_user_unread_idx.
+    db().select({ n: count() }).from(notifications).where(and(eq(notifications.userId, actor.userId), isNull(notifications.readAt))),
+  ]);
   if (!p) return null;
   return {
     displayName: p.displayName,
@@ -34,6 +42,8 @@ export const getViewer = cache(async (): Promise<ViewerDTO | null> => {
     premium: !!p.premiumUntil && p.premiumUntil > new Date(),
     isAdmin: hasRole(actor, 'admin'),
     memberSince: p.createdAt.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }).toUpperCase(),
+    unreadNotifications: unread?.n ?? 0,
+    readerSettings: p.readerSettings ?? {},
   };
 });
 

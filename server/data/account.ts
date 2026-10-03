@@ -32,7 +32,12 @@ export async function updateMyProfile(input: UpdateProfileInput) {
   if (Object.keys(data).length === 0) return;
   // Always scoped to the caller: there is no user id parameter to tamper with.
   try {
-    await db().update(profiles).set(data).where(eq(profiles.userId, actor.userId));
+    const { readerSettings, ...rest } = data;
+    await db().update(profiles).set({
+      ...rest,
+      // Merge so saving one reader option doesn't drop the others.
+      ...(readerSettings ? { readerSettings: sql`${profiles.readerSettings} || ${JSON.stringify(readerSettings)}::jsonb` } : {}),
+    }).where(eq(profiles.userId, actor.userId));
   } catch (err) {
     rethrowUnique(err, 'That username is taken.');
   }

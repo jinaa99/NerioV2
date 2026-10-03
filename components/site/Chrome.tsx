@@ -44,6 +44,7 @@ export function Header() {
   const go = (href: string) => { setMenu(false); router.push(href); };
   const items: [string, string, () => void][] = [
     ['person', 'Profile', () => go('/profile')],
+    ['notifications', viewer?.unreadNotifications ? `Notifications · ${viewer.unreadNotifications}` : 'Notifications', () => go('/profile?tab=notifications')],
     ['bookmarks', 'Bookmarks', () => go('/profile?tab=bookmarks')],
     ['history', 'History', () => go('/profile?tab=history')],
     ['workspace_premium', site.premium ? 'Premium · active' : 'Get Premium', () => go('/premium')],
@@ -74,7 +75,10 @@ export function Header() {
           <Link href={`/login?next=${encodeURIComponent(path)}`} className="btn btn-secondary" style={{ '--h': '38px', '--px': '14px', '--r': '10px', '--fs': '14px' } as React.CSSProperties}>Sign in</Link>
         )}
         {viewer && <div ref={menuRef} style={{ position: 'relative' }}>
-          <button type="button" className="avatar-btn" aria-label="Account menu" aria-expanded={menu} onClick={() => setMenu(m => !m)}>{viewer.initials}</button>
+          <button type="button" className="avatar-btn" aria-label={viewer.unreadNotifications ? `Account menu, ${viewer.unreadNotifications} unread notifications` : 'Account menu'} aria-expanded={menu} onClick={() => setMenu(m => !m)} style={{ position: 'relative' }}>
+            {viewer.initials}
+            {viewer.unreadNotifications > 0 && <span className="unread-dot" aria-hidden />}
+          </button>
           {menu && (
             <div role="menu" className="menu" style={{ position: 'absolute', right: 0, top: 50, width: 248, zIndex: 40 }}>
               <div className="stack" style={{ padding: '12px 12px 14px', gap: 2, borderBottom: '1px solid var(--line-1)', marginBottom: 6 }}>
@@ -107,7 +111,8 @@ export function TabBar() {
   return (
     <nav aria-label="Primary" className="tabbar mobile-only">
       {items.map(t => {
-        const inner = <><Icon name={t.icon} size={24} fill={t.on} />{t.label}</>;
+        const dot = t.label === 'Profile' && !!site.viewer?.unreadNotifications;
+        const inner = <><span style={{ position: 'relative', display: 'inline-flex' }}><Icon name={t.icon} size={24} fill={t.on} />{dot && <span className="unread-dot" aria-hidden />}</span>{t.label}</>;
         const style = { color: t.on ? 'var(--ink-1)' : 'var(--ink-3)' };
         return t.href
           ? <Link key={t.label} href={t.href} aria-current={t.on ? 'page' : undefined} className="tabbar-item" style={style}>{inner}</Link>

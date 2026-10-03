@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { Bar, Button, Cover, Icon, Segmented } from '@/components/ui';
 import { backdropBg, chapterNo, compact, coverBg, timeAgo } from '@/lib/catalog';
 import type { SeriesCardDTO } from '@/server/data/catalog';
+import type { ContinueReadingDTO } from '@/server/data/reading';
 import { Footer } from './Chrome';
 import { useSite } from './store';
 
@@ -17,7 +18,7 @@ export type HomeData = {
   popular: [SeriesCardDTO[], SeriesCardDTO[], SeriesCardDTO[]];
   pick: SeriesCardDTO | null;
   genres: { slug: string; name: string; hue: number; count: number }[];
-  continueReading: { seriesSlug: string; seriesTitle: string; coverHue: number; chapterNumber: number; percent: number }[];
+  continueReading: ContinueReadingDTO[];
 };
 
 const HERO_TAGS = ['MOST READ', 'TRENDING', 'POPULAR'];
@@ -112,17 +113,20 @@ export default function Home({ data }: { data: HomeData }) {
           <section aria-labelledby="h-continue" className="stack" style={{ gap: 20 }}>
             <SectionHead id="h-continue" title="Continue reading" aside={<MoreLink href="/profile?tab=history" label="History" />} />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(min(100%,300px),1fr))', gap: 12 }}>
-              {continueReading.map(c => (
-                <Link key={c.seriesSlug} href={`/read/${c.seriesSlug}/${chapterNo(c.chapterNumber)}`} className="card hover-card row" style={{ gap: 14, padding: 12, color: 'var(--ink-1)' }}>
-                  <Cover bg={coverBg(c.coverHue)} width={64} radius={10} />
-                  <div className="stack grow" style={{ gap: 7, minWidth: 0 }}>
-                    <span className="ellipsis" style={{ font: '600 15px/1.3 var(--sans)' }}>{c.seriesTitle}</span>
-                    <span className="meta">CH. {chapterNo(c.chapterNumber)} · {c.percent}%</span>
-                    <Bar pct={c.percent} />
-                  </div>
-                  <span className="icon-btn solid round" style={{ '--h': '40px' } as React.CSSProperties}><Icon name="play_arrow" fill /></span>
-                </Link>
-              ))}
+              {continueReading.map(c => {
+                const target = c.nextChapter ?? c.chapterNumber;
+                return (
+                  <Link key={c.seriesSlug} href={`/read/${c.seriesSlug}/${chapterNo(target)}`} className="card hover-card row" style={{ gap: 14, padding: 12, color: 'var(--ink-1)' }}>
+                    <Cover bg={coverBg(c.coverHue, c.coverUrl)} width={64} radius={10} />
+                    <div className="stack grow" style={{ gap: 7, minWidth: 0 }}>
+                      <span className="ellipsis" style={{ font: '600 15px/1.3 var(--sans)' }}>{c.seriesTitle}</span>
+                      <span className="meta">{c.nextChapter !== null ? `UP NEXT · CH. ${chapterNo(c.nextChapter)}` : `CH. ${chapterNo(c.chapterNumber)} · ${c.percent}%`}</span>
+                      <Bar pct={c.nextChapter !== null ? 0 : c.percent} />
+                    </div>
+                    <span className="icon-btn solid round" style={{ '--h': '40px' } as React.CSSProperties}><Icon name="play_arrow" fill /></span>
+                  </Link>
+                );
+              })}
             </div>
           </section>
         )}

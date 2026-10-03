@@ -114,3 +114,6 @@
   border-radius: 8px; padding: 6px 10px; cursor: pointer;
 }
 .proto-btn:hover { color: var(--ink-2); }
+
+/* Unread notifications marker on the avatar / Profile tab */
+.unread-dot { position: absolute; top: -1px; right: -1px; width: 10px; height: 10px; border-radius: 50%; background: var(--ember); box-shadow: 0 0 0 2px var(--bg); }

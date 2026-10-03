@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { Bar, Button, Cover, Icon, IconButton, Segmented } from '@/components/ui';
 import { SERIES_STATUS_LABEL, SERIES_STATUS_TONE, backdropBg, chapterName, chapterNo, compact, coverBg, timeAgo } from '@/lib/catalog';
+import { setFollowAction } from '@/server/actions/library';
 import type { ChapterListItemDTO, Paged, SeriesCardDTO, SeriesDetailDTO } from '@/server/data/catalog';
 import { useSite } from './store';
 
@@ -20,7 +21,7 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-export default function SeriesDetail({ s, similar }: { s: SeriesDetailDTO; similar: SeriesCardDTO[] }) {
+export default function SeriesDetail({ s, similar, following: initialFollowing }: { s: SeriesDetailDTO; similar: SeriesCardDTO[]; following: boolean }) {
   const site = useSite();
   const router = useRouter();
   const [desc, setDesc] = useState(true);
@@ -65,6 +66,22 @@ export default function SeriesDetail({ s, similar }: { s: SeriesDetailDTO; simil
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `load` reads the latest state
   }, [query, desc, filter]);
   useEffect(() => () => ctrl.current?.abort(), []);
+
+  const [following, setFollowing] = useState(initialFollowing);
+  const [followBusy, setFollowBusy] = useState(false);
+  const toggleFollow = () => {
+    if (!site.viewer) return site.requireSignIn('Sign in to follow series and get new-chapter alerts');
+    const next = !following;
+    setFollowing(next);
+    setFollowBusy(true);
+    setFollowAction(s.slug, next)
+      .then(res => {
+        if (!res.ok) { setFollowing(!next); site.toast(res.error, 'error', 'var(--danger)'); }
+        else site.toast(next ? `Following ${s.title}. We’ll let you know about new chapters.` : `Unfollowed ${s.title}`, next ? 'notifications_active' : 'notifications_off', 'var(--info)');
+      })
+      .catch(() => { setFollowing(!next); site.toast('Couldn’t update. Check your connection.', 'error', 'var(--danger)'); })
+      .finally(() => setFollowBusy(false));
+  };
 
   const share = () => {
     try { navigator.clipboard?.writeText(location.href); } catch {}
@@ -115,6 +132,8 @@ export default function SeriesDetail({ s, similar }: { s: SeriesDetailDTO; simil
                 style={{ '--h': '52px', '--r': '12px', background: bm ? 'rgba(232,130,95,.1)' : undefined, borderColor: bm ? 'rgba(232,130,95,.4)' : undefined } as React.CSSProperties}>
                 <Icon name="bookmark" fill={bm} color={bm ? 'var(--ember)' : undefined} />{bm ? 'Bookmarked' : 'Bookmark'}
               </button>
+              <IconButton icon={following ? 'notifications_active' : 'notifications'} fill={following} label={following ? 'Unfollow' : 'Follow for new chapters'} aria-pressed={following}
+                h={52} r={12} variant="boxed" disabled={followBusy} iconColor={following ? 'var(--ember)' : undefined} onClick={toggleFollow} />
               <IconButton icon="ios_share" label="Share" h={52} r={12} variant="boxed" onClick={share} />
             </div>
             {progress && s.latestChapter !== null && (
