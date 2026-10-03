@@ -5,6 +5,7 @@ import { oauthAccounts, sessions } from './auth';
 import { paymentRecords } from './billing';
 import { chapterPages, chapters, characters, genres, glossaryTerms, series, seriesGenres, seriesTags, tags } from './catalog';
 import { profiles, roles, userRoles, users } from './identity';
+import { contentReports } from './moderation';
 import { translationJobs, translationSegments } from './translation';
 
 export const usersRelations = relations(users, ({ one, many }) => ({
@@ -128,4 +129,10 @@ export const paymentRecordsRelations = relations(paymentRecords, ({ one }) => ({
 
 export const adminAuditLogsRelations = relations(adminAuditLogs, ({ one }) => ({
   actor: one(users, { fields: [adminAuditLogs.actorId], references: [users.id] }),
+}));
+
+export const contentReportsRelations = relations(contentReports, ({ one }) => ({
+  reporter: one(users, { fields: [contentReports.reporterId], references: [users.id] }),
+  series: one(series, { fields: [contentReports.seriesId], references: [series.id] }),
+  chapter: one(chapters, { fields: [contentReports.chapterId], references: [chapters.id] }),
 }));

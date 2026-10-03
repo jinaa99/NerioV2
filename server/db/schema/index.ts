@@ -6,4 +6,5 @@ export * from './activity';
 export * from './translation';
 export * from './billing';
 export * from './audit';
+export * from './moderation';
 export * from './relations';

@@ -50,6 +50,13 @@
       "when": 1791044222640,
       "tag": "0006_reading_page_offset",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791046428327,
+      "tag": "0007_reports_settings",
+      "breakpoints": true
     }
   ]
 }

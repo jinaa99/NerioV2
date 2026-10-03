@@ -2,9 +2,9 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { useState, type ReactNode } from 'react';
 import { Icon, IconButton, useEscape } from '@/components/ui';
-import { useAdmin } from './store';
 
 export const SECTIONS = {
   overview: { href: '/admin', label: 'Overview', title: 'Overview', icon: 'space_dashboard', group: '' },
@@ -16,6 +16,7 @@ export const SECTIONS = {
   users: { href: '/admin/users', label: 'Users', title: 'Users & payments', icon: 'group', group: 'PEOPLE' },
   reports: { href: '/admin/reports', label: 'Reports', title: 'Reports', icon: 'flag', group: '' },
   settings: { href: '/admin/settings', label: 'Settings', title: 'Settings', icon: 'settings', group: 'SYSTEM' },
+  audit: { href: '/admin/audit', label: 'Audit log', title: 'Audit log', icon: 'policy', group: '' },
 } as const;
 type Key = keyof typeof SECTIONS | 'review';
 
@@ -24,20 +25,22 @@ function currentKey(path: string): Key {
   return (seg || 'overview') as Key;
 }
 
-export default function AdminShell({ initials, children }: { initials: string; children: ReactNode }) {
+export type NavCounts = { review: number; failed: number; active: number; payments: number; reports: number };
+
+export default function AdminShell({ initials, counts: c, children }: { initials: string; counts: NavCounts; children: ReactNode }) {
   const path = usePathname();
+  const router = useRouter();
   const key = currentKey(path);
-  const { jobs, pays, reports } = useAdmin();
   const [navOpen, setNavOpen] = useState(false);
+  const [q, setQ] = useState('');
   useEscape(() => setNavOpen(false), navOpen);
 
-  const failed = jobs.filter(j => j.status === 'FAILED').length;
-  const running = jobs.filter(j => j.status === 'RUNNING').length;
+  const failed = c.failed;
   const counts: Partial<Record<Key, number>> = {
-    queue: 5,
-    processing: failed || running,
-    users: pays.filter(p => p === 'pending').length,
-    reports: reports.filter(Boolean).length,
+    queue: c.review,
+    processing: c.failed || c.active,
+    users: c.payments,
+    reports: c.reports,
   };
   const title = key === 'review' ? 'Translation review' : SECTIONS[key]?.title ?? 'Admin';
   const crumb = key === 'review' ? 'PIPELINE / QUEUE' : (SECTIONS[key as keyof typeof SECTIONS]?.group || 'NERIO ADMIN');
@@ -71,7 +74,8 @@ export default function AdminShell({ initials, children }: { initials: string; c
         </nav>
         <div className="stack" style={{ padding: 14, borderTop: '1px solid rgba(255,255,255,.06)', gap: 10 }}>
           <div className="row" style={{ gap: 8, font: '500 12px var(--mono)', color: 'var(--ink-3)' }}>
-            <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--success)', animation: 'pulse 2.4s infinite' }} />4 WORKERS ONLINE
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: failed ? 'var(--danger)' : c.active ? 'var(--ember)' : 'var(--ink-4)' }} />
+            {failed ? `${failed} FAILED JOB${failed === 1 ? '' : 'S'}` : c.active ? `${c.active} JOB${c.active === 1 ? '' : 'S'} IN PIPELINE` : 'PIPELINE IDLE'}
           </div>
           <Link href="/" className="row" style={{ gap: 8, font: '500 13px var(--sans)', color: 'var(--ink-2)' }}><Icon name="open_in_new" size={18} />View reader site</Link>
         </div>
@@ -84,11 +88,12 @@ export default function AdminShell({ initials, children }: { initials: string; c
             <span style={{ font: '500 11px var(--mono)', letterSpacing: '.08em', color: 'var(--ink-3)' }}>{crumb}</span>
             <h1 className="ellipsis" style={{ font: '600 17px var(--sans)' }}>{title}</h1>
           </div>
-          <label className="searchbox admin-wide" style={{ width: 260, '--h': '36px', borderRadius: 9, background: 'var(--s2)', padding: '0 10px' } as React.CSSProperties}>
+          <form role="search" className="searchbox admin-wide" style={{ width: 260, '--h': '36px', borderRadius: 9, background: 'var(--s2)', padding: '0 10px' } as React.CSSProperties}
+            onSubmit={e => { e.preventDefault(); const t = q.trim(); if (!t) return; router.push(`${key === 'users' ? '/admin/users' : '/admin/series'}?q=${encodeURIComponent(t)}`); }}>
             <Icon name="search" size={18} />
-            <input placeholder="Search series, chapters, users" aria-label="Admin search" style={{ fontSize: 13 }} />
-            <span className="kbd" style={{ fontSize: 10, padding: '2px 5px', borderRadius: 4 }}>⌘K</span>
-          </label>
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder={key === 'users' ? 'Search users' : 'Search series'} aria-label="Admin search" style={{ fontSize: 13 }} />
+            <span className="kbd" style={{ fontSize: 10, padding: '2px 5px', borderRadius: 4 }}>↵</span>
+          </form>
           <Link href="/admin/upload" className="btn btn-primary" style={{ '--h': '36px', '--px': '12px', '--r': '9px', '--fs': '13px', gap: 6, color: 'var(--bg)' } as React.CSSProperties}>
             <Icon name="upload" size={18} /><span className="admin-wide">Upload chapter</span>
           </Link>

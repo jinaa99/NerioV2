@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Button, Icon, IconButton, Segmented, SwitchRow, useViewportWidth } from '@/components/ui';
 import { chapterName, chapterNo, timeAgo } from '@/lib/catalog';
+import { reportProblemAction } from '@/server/actions/library';
 import type { ReaderChapterDTO } from '@/server/data/catalog';
 import { useSite, type ReaderPrefs } from './store';
 
@@ -104,7 +105,7 @@ export default function Reader({ chapter }: { chapter: ReaderChapterDTO }) {
   const [slots, setSlots] = useState<Slot[]>(() => pages.map((_, i) => ({ state: i < 2 ? 'loading' : 'idle', attempt: 0 })));
   const [current, setCurrent] = useState(0);
   const [chrome, setChrome] = useState(true);
-  const [panel, setPanel] = useState<null | 'settings' | 'chapters' | 'shortcuts'>(null);
+  const [panel, setPanel] = useState<null | 'settings' | 'chapters' | 'shortcuts' | 'report'>(null);
   const [prog, setProg] = useState(0);
   const [saved, setSaved] = useState(false);
   const [fs, setFs] = useState(false);
@@ -472,6 +473,8 @@ export default function Reader({ chapter }: { chapter: ReaderChapterDTO }) {
         <div className="row" style={{ gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
           {chapter.prev !== null && <Button variant="outline" fs={14} icon="arrow_back" onClick={goPrev}>Chapter {chapterNo(chapter.prev)}</Button>}
           <Button variant="outline" fs={14} onClick={exit}>All chapters</Button>
+          <Button variant="ghost" fs={14} style={{ fontWeight: 500, color: 'var(--ink-3)' }}
+            onClick={() => (site.viewer ? setPanel('report') : site.requireSignIn('Sign in to report a problem'))}>Report a problem</Button>
         </div>
       </section>
 
@@ -538,6 +541,11 @@ export default function Reader({ chapter }: { chapter: ReaderChapterDTO }) {
         </aside>
       </>}
 
+      {panel === 'report' && (
+        <ReportDialog seriesSlug={slug} chapterNumber={ch} page={N ? current + 1 : undefined} onClose={() => setPanel(null)}
+          onSent={() => { setPanel(null); toast('Report sent to the team. Thanks!', 'flag', 'var(--info)'); }} />
+      )}
+
       {panel === 'shortcuts' && (
         <div className="scrim" style={{ background: 'rgba(5,5,6,.7)', display: 'grid', placeItems: 'center', padding: 16 }} onClick={() => setPanel(null)}>
           <div role="dialog" aria-label="Keyboard shortcuts" className="stack" style={{ width: 'min(420px,100%)', padding: 24, borderRadius: 20, background: 'var(--s2)', border: '1px solid rgba(255,255,255,.1)', gap: 6, animation: 'pop .24s var(--ease)' }}>
@@ -552,5 +560,46 @@ export default function Reader({ chapter }: { chapter: ReaderChapterDTO }) {
         </div>
       )}
     </main>
+  );
+}
+
+const REPORT_KINDS: [string, string][] = [['wrong_translation', 'Translation'], ['missing_page', 'Missing page'], ['text_overflow', 'Text cut off'], ['image_quality', 'Image quality'], ['other', 'Other']];
+
+function ReportDialog({ seriesSlug, chapterNumber, page, onClose, onSent }: { seriesSlug: string; chapterNumber: number; page?: number; onClose: () => void; onSent: () => void }) {
+  const [kind, setKind] = useState('wrong_translation');
+  const [pageNo, setPageNo] = useState(page ? String(page) : '');
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const send = () => {
+    setSending(true);
+    setError(null);
+    reportProblemAction({
+      seriesSlug, chapterNumber, kind: kind as 'other', message,
+      ...(pageNo && Number(pageNo) > 0 ? { pageNumber: Math.floor(Number(pageNo)) } : {}),
+    }).then(res => { if (res.ok) onSent(); else setError(res.error); }).catch(() => setError('Couldn’t send. Check your connection.')).finally(() => setSending(false));
+  };
+  return (
+    <div className="scrim" style={{ background: 'rgba(5,5,6,.7)', display: 'grid', placeItems: 'center', padding: 16 }} onClick={onClose}>
+      <div role="dialog" aria-label="Report a problem" className="stack" onClick={e => e.stopPropagation()}
+        style={{ width: 'min(460px,100%)', padding: 24, borderRadius: 20, background: 'var(--s2)', border: '1px solid rgba(255,255,255,.1)', gap: 16, animation: 'pop .24s var(--ease)' }}>
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <span style={{ font: '400 24px var(--serif)' }}>Report a problem</span>
+          <IconButton icon="close" label="Close" h={40} onClick={onClose} style={{ color: 'var(--ink-2)' }} />
+        </div>
+        <div className="row" style={{ gap: 6, flexWrap: 'wrap' }} role="radiogroup" aria-label="Problem">
+          {REPORT_KINDS.map(([v, l]) => <button key={v} type="button" role="radio" aria-checked={kind === v} className="genre-chip" onClick={() => setKind(v)}>{l}</button>)}
+        </div>
+        <label className="field"><span className="label">Page <span style={{ color: 'var(--ink-3)', fontWeight: 400 }}>optional</span></span>
+          <input className="input mono" inputMode="numeric" value={pageNo} onChange={e => setPageNo(e.target.value.replace(/[^0-9]/g, ''))} style={{ '--h': '40px', maxWidth: 120 } as React.CSSProperties} />
+        </label>
+        <label className="field"><span className="label">What’s wrong?</span>
+          <textarea className="input" rows={4} maxLength={2000} value={message} onChange={e => setMessage(e.target.value)} placeholder="e.g. Yeon says “sister” but it’s her teacher."
+            style={{ height: 'auto', padding: '10px 14px', lineHeight: 1.5, resize: 'vertical' }} />
+        </label>
+        {error && <span role="alert" style={{ fontSize: 13, color: 'var(--danger-text)' }}>{error}</span>}
+        <Button variant="primary" h={48} loading={sending} disabled={sending || message.trim().length < 3} onClick={send}>Send report</Button>
+      </div>
+    </div>
   );
 }

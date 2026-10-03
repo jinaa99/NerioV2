@@ -19,3 +19,6 @@ export const segmentReview = pgEnum('segment_review', ['pending', 'approved', 'e
 export const paymentMethod = pgEnum('payment_method', ['bank_transfer']);
 export const paymentStatus = pgEnum('payment_status', ['pending', 'confirmed', 'rejected', 'refunded']);
 export const premiumPlan = pgEnum('premium_plan', ['1m', '3m', '12m']);
+
+export const reportKind = pgEnum('report_kind', ['wrong_translation', 'missing_page', 'text_overflow', 'image_quality', 'other']);
+export const reportStatus = pgEnum('report_status', ['open', 'resolved', 'dismissed']);

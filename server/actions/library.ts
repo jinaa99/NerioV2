@@ -8,6 +8,8 @@ import { updateMyProfile } from '../data/account';
 import { follow, setBookmark, unfollow } from '../data/library';
 import { markNotificationsRead } from '../data/notifications';
 import { clearReadingHistory } from '../data/reading';
+import { createReport, type CreateReportInput } from '../data/reports';
+import { createPendingPayment, submitTransfer } from '../data/billing';
 import type { UpdateProfileInput } from '@/lib/validation';
 import { DalError } from '../errors';
 
@@ -54,4 +56,25 @@ export async function savePreferencesAction(prefs: Preferences): Promise<Library
 
 export async function saveReaderSettingsAction(settings: NonNullable<UpdateProfileInput['readerSettings']>): Promise<LibraryResult> {
   return run(() => updateMyProfile({ readerSettings: settings }));
+}
+
+export async function reportProblemAction(input: CreateReportInput): Promise<LibraryResult> {
+  return run(() => createReport(input));
+}
+
+export async function startPaymentAction(plan: '1m' | '3m' | '12m'): Promise<LibraryResult & { payment?: { id: string; referenceCode: string } }> {
+  let payment: { id: string; referenceCode: string } | undefined;
+  const res = await run(async () => { const p = await createPendingPayment({ plan }); payment = { id: p.id, referenceCode: p.referenceCode }; }, ['/premium']);
+  return res.ok ? { ...res, payment } : res;
+}
+
+export async function submitTransferAction(paymentId: string, reference: string): Promise<LibraryResult & { fields?: Record<string, string[]> }> {
+  try {
+    await submitTransfer(paymentId, reference);
+  } catch (err) {
+    if (err instanceof DalError) return { ok: false, error: err.message, fields: err.fields, signIn: err.code === 'UNAUTHENTICATED' };
+    throw err;
+  }
+  revalidatePath('/premium');
+  return { ok: true };
 }

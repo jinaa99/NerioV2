@@ -1,7 +1,7 @@
 import 'server-only';
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lte, max, or, sql, type SQL } from 'drizzle-orm';
 import {
-  addPagesInput, adminListChaptersInput, adminListSeriesInput, createChapterInput, createSeriesInput, listSeriesInput,
+  addPagesInput, adminListChaptersInput, uploadChapterInput, type UploadChapterInput, adminListSeriesInput, createChapterInput, createSeriesInput, listSeriesInput,
   publicChaptersInput, reorderPagesInput, slug as slugSchema, toSlug, updateChapterInput, updateSeriesInput, uuid,
   type AddPagesInput, type AdminListChaptersInput, type AdminListSeriesInput, type CreateChapterInput, type CreateSeriesInput,
   type ListSeriesInput, type PublicChaptersInput, type ReorderPagesInput, type UpdateChapterInput, type UpdateSeriesInput,
@@ -9,12 +9,14 @@ import {
 import type { ChapterStatus, SeriesStatus } from '@/lib/catalog';
 import { getCurrentActor, hasRole, requireRole, type Actor } from '../auth/actor';
 import { db, type Executor } from '../db/client';
+import { outer } from '../db/sql';
 import {
-  chapterPages, chapters, follows, genres, notifications, profiles, readingProgress, series, seriesGenres, seriesTags, tags,
+  chapterPages, chapters, follows, genres, notifications, profiles, readingProgress, series, seriesGenres, seriesTags, tags, translationJobs,
 } from '../db/schema';
 import { DalError, parseInput, rethrowUnique } from '../errors';
 import { imageSrc } from '../storage';
 import { recordAudit } from './audit';
+import { getSettings } from './settings';
 
 /* DTOs: the only shapes that leave the DAL. */
 
@@ -67,7 +69,7 @@ const isPublishedChapter = and(eq(chapters.status, 'published'), lte(chapters.pu
 const escapeLike = (s: string) => `%${s.replace(/[\\%_]/g, c => `\\${c}`)}%`;
 
 // Correlated subqueries over visible chapters; served by chapters_series_number_uq / chapters_series_published_idx.
-const visibleIn = sql`c.series_id = ${series.id} and c.status = 'published' and c.published_at <= now()`;
+const visibleIn = sql`c.series_id = ${outer(series.id)} and c.status = 'published' and c.published_at <= now()`;
 const chapterStats = {
   chapterCount: sql<number>`(select count(*)::int from ${chapters} c where ${visibleIn})`,
   firstChapter: sql<number | null>`(select min(c.number)::float8 from ${chapters} c where ${visibleIn})`,
@@ -328,7 +330,7 @@ export async function adminListSeries(input: AdminListSeriesInput = {}): Promise
     db().select({
       id: series.id, slug: series.slug, title: series.title, author: series.author, status: series.status,
       coverHue: series.coverHue, coverKey: series.coverKey, viewCount: series.viewCount, updatedAt: series.updatedAt,
-      chapterCount: sql<number>`(select count(*)::int from ${chapters} c where c.series_id = ${series.id})`,
+      chapterCount: sql<number>`(select count(*)::int from ${chapters} c where c.series_id = ${outer(series.id)})`,
       publishedCount: chapterStats.chapterCount,
     }).from(series).where(where).orderBy(desc(series.updatedAt), asc(series.id)).limit(q.limit).offset(q.offset),
     db().select({ total: count() }).from(series).where(where),
@@ -340,7 +342,10 @@ export async function adminListSeries(input: AdminListSeriesInput = {}): Promise
 /** Every non-deleted series, for pickers. */
 export async function adminSeriesOptions() {
   await requireRole('editor');
-  return db().select({ id: series.id, title: series.title }).from(series).where(isNull(series.deletedAt)).orderBy(asc(series.title)).limit(2000);
+  return db().select({
+    id: series.id, title: series.title, sourceLanguage: series.sourceLanguage,
+    nextNumber: sql<number>`(select coalesce(floor(max(c.number)), 0)::int + 1 from ${chapters} c where c.series_id = ${outer(series.id)})`,
+  }).from(series).where(isNull(series.deletedAt)).orderBy(asc(series.title)).limit(2000);
 }
 
 export type AdminSeriesDTO = {
@@ -515,11 +520,14 @@ export async function deleteSeries(seriesId: string) {
 
 /* Staff writes: chapters */
 
-/** Notify followers (with alerts on) about a chapter that is now live. One statement regardless of follower count. */
-async function notifyFollowers(tx: Executor, ch: { id: string; seriesId: string; number: number }) {
+/**
+ * Notify followers (with alerts on) about a chapter that is now live. One statement regardless of follower count.
+ * Skipped when the admin setting "Notify followers on publish" is off.
+ */
+export async function notifyFollowers(tx: Executor, ch: { id: string; seriesId: string; number: number }) {
   const [s] = await tx.update(series).set({ updatedAt: new Date() }).where(eq(series.id, ch.seriesId)).returning({ slug: series.slug, title: series.title, status: series.status });
   const href = `/read/${s.slug}/${ch.number}`;
-  if (s.status === 'draft') return href;
+  if (s.status === 'draft' || !(await getSettings()).notifyFollowersOnPublish) return href;
   await tx.execute(sql`
     insert into ${notifications} (user_id, type, title, href, data)
     select f.user_id, 'new_chapter', ${`${s.title} · Chapter ${ch.number}`}, ${href}, ${JSON.stringify({ seriesId: ch.seriesId, chapterId: ch.id })}::jsonb
@@ -706,6 +714,40 @@ export async function deletePage(pageId: string) {
     await recordAudit(tx, actor, { action: 'chapter.pages.delete', targetType: 'chapter', targetId: page.chapterId, metadata: { pageId: id } });
     return { chapterId: page.chapterId };
   });
+}
+
+/* Upload: chapter + pages (+ processing job) in one transaction */
+
+/**
+ * Create a chapter from uploaded pages. `process` queues a pipeline job (the chapter waits in
+ * `processing` for a worker); `direct` is for pages that are already translated and typeset,
+ * which leaves the chapter `ready` to publish.
+ */
+export async function uploadChapter(input: UploadChapterInput) {
+  const actor = await requireRole('editor');
+  const data = parseInput(uploadChapterInput, input);
+  try {
+    return await db().transaction(async tx => {
+      const [s] = await tx.select({ id: series.id, sourceLanguage: series.sourceLanguage }).from(series).where(and(eq(series.id, data.seriesId), isNull(series.deletedAt)));
+      if (!s) throw new DalError('NOT_FOUND', 'Series not found.');
+      const [ch] = await tx.insert(chapters).values({
+        seriesId: s.id, number: data.number, title: data.title, status: data.mode === 'process' ? 'processing' : 'ready',
+        pageCount: data.pages.length, createdBy: actor.userId,
+      }).returning({ id: chapters.id, number: chapters.number });
+      await tx.insert(chapterPages).values(data.pages.map((p, i) => ({ chapterId: ch.id, pageNumber: i + 1, sourceKey: p.url, width: p.width, height: p.height })));
+      let jobId: string | null = null;
+      if (data.mode === 'process') {
+        const [job] = await tx.insert(translationJobs).values({
+          chapterId: ch.id, sourceLanguage: data.sourceLanguage ?? s.sourceLanguage, targetLanguage: data.targetLanguage, requestedBy: actor.userId,
+        }).returning({ id: translationJobs.id });
+        jobId = job.id;
+      }
+      await recordAudit(tx, actor, { action: 'chapter.upload', targetType: 'chapter', targetId: ch.id, metadata: { seriesId: s.id, number: ch.number, pages: data.pages.length, mode: data.mode, jobId } });
+      return { chapterId: ch.id, jobId };
+    });
+  } catch (err) {
+    rethrowUnique(err, 'That chapter number already exists in this series.');
+  }
 }
 
 /* Helpers for callers that only have an id */

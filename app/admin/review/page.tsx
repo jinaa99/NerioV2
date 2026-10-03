@@ -1,10 +1,8 @@
-import type { Metadata } from 'next';
-import Review from '@/components/admin/Review';
+import { redirect } from 'next/navigation';
 import { requireAdminPage } from '@/server/auth/guards';
 
-export const metadata: Metadata = { title: 'Translation review' };
-
+/** Review always targets a job; pick one from the queue. */
 export default async function Page() {
   await requireAdminPage('/admin/review');
-  return <Review />;
+  redirect('/admin/queue');
 }

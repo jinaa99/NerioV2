@@ -1,9 +1,10 @@
 import 'server-only';
-import { and, count, desc, eq, isNull, sql, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, isNull, sql } from 'drizzle-orm';
 import { pagination, slug as slugSchema, type Pagination } from '@/lib/validation';
 import { z } from 'zod';
 import { requireActor } from '../auth/actor';
 import { db } from '../db/client';
+import { outer } from '../db/sql';
 import { bookmarks, chapters, follows, profiles, readingHistory, readingProgress, series, seriesGenres } from '../db/schema';
 import { DalError, parseInput } from '../errors';
 import { imageSrc } from '../storage';
@@ -18,7 +19,7 @@ export type Paged<T> = { items: T[]; total: number; limit: number; offset: numbe
 type SeriesRef = { slug: string; title: string; coverHue: number; coverUrl: string | null };
 
 const visibleSeries = and(isNull(series.deletedAt), sql`${series.status} <> 'draft'`);
-const visibleIn = (seriesCol: SQL | typeof series.id) => sql`c.series_id = ${seriesCol} and c.status = 'published' and c.published_at <= now()`;
+const visibleIn = (seriesCol: typeof series.id) => sql`c.series_id = ${outer(seriesCol)} and c.status = 'published' and c.published_at <= now()`;
 const latestChapter = sql<number | null>`(select max(c.number)::float8 from ${chapters} c where ${visibleIn(series.id)})`;
 const seriesRef = { slug: series.slug, title: series.title, coverHue: series.coverHue, coverKey: series.coverKey };
 const toRef = <T extends { coverKey: string | null }>({ coverKey, ...r }: T) => ({ ...r, coverUrl: imageSrc(coverKey) });
@@ -73,7 +74,7 @@ export async function listMyBookmarks(input: Pagination = {}): Promise<Paged<Boo
   const [rows, [{ total }]] = await Promise.all([
     db().select({
       ...seriesRef, addedAt: bookmarks.createdAt, latestChapter,
-      progressChapter: sql<number | null>`(select c.number::float8 from ${readingProgress} rp join ${chapters} c on c.id = rp.chapter_id where rp.user_id = ${userId} and rp.series_id = ${series.id})`,
+      progressChapter: sql<number | null>`(select c.number::float8 from ${readingProgress} rp join ${chapters} c on c.id = rp.chapter_id where rp.user_id = ${userId} and rp.series_id = ${outer(series.id)})`,
     }).from(bookmarks).innerJoin(series, eq(series.id, bookmarks.seriesId)).where(where)
       .orderBy(desc(bookmarks.createdAt)).limit(q.limit).offset(q.offset),
     db().select({ total: count() }).from(bookmarks).innerJoin(series, eq(series.id, bookmarks.seriesId)).where(where),

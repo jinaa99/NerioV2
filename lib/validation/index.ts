@@ -172,6 +172,18 @@ export const addPagesInput = z.object({
 }).strict();
 export type AddPagesInput = z.input<typeof addPagesInput>;
 
+export const uploadChapterInput = z.object({
+  seriesId: uuid,
+  number: chapterNumber,
+  title: z.string().trim().max(200).nullish().transform(v => v || null),
+  sourceLanguage: languageTag.optional(),
+  targetLanguage: languageTag.default('en'),
+  /** `process`: queue OCR/translation. `direct`: pages are final; chapter is ready to publish. */
+  mode: z.enum(['process', 'direct']),
+  pages: addPagesInput.shape.pages,
+}).strict();
+export type UploadChapterInput = z.input<typeof uploadChapterInput>;
+
 export const reorderPagesInput = z.object({
   chapterId: uuid,
   /** Every page id of the chapter, in the new reading order. */

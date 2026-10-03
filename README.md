@@ -19,7 +19,7 @@ npm run build
 | `/profile?tab=…` | Overview, bookmarks, history, following, notifications, achievements, settings (`&page=N` on list tabs) |
 | `/premium` | Bank-transfer Premium flow (info → pending → confirmed) |
 | `/login`, `/register` | Sign in and create an account (`?next=` returns you to the page you came from) |
-| `/admin/*` | Overview, series, chapters, upload, queue, review, processing, users, reports, settings |
+| `/admin/*` | Dashboard, series, chapters, upload, processing, translation queue, review (`/admin/review/[jobId]`), users & payments, reports, settings, audit log |
 | `/admin/series/new`, `/admin/series/[id]` | Series editor: title, slug, alternative titles, description, author, artist, status, genres, tags, cover |
 | `/admin/chapters?series=…`, `/admin/chapters/new`, `/admin/chapters/[id]` | Chapter list and editor: number, title, access, draft/published, publication date (future = scheduled), pages |
 | `/design-system` | Tokens and component reference |
@@ -28,10 +28,10 @@ npm run build
 ## Structure
 
 - `lib/catalog.ts`: client-safe display helpers for catalog DTOs (covers, status labels, number/time formatting).
-- `lib/data.ts`, `lib/admin-data.ts`: mock content still used by screens without a backend yet (premium, upload/processing pipeline, users, reports).
+- `lib/data.ts`: the original mock catalog, now only used by `npm run db:seed` and the design-system page.
 - `components/ui.tsx`: shared primitives (Button, IconButton, Cover, Segmented, Switch, toasts).
 - `components/site/*`: reader site; `store.tsx` holds the signed-in viewer, optimistic bookmark state, reader prefs and the (still mock) Premium payment flow.
-- `components/admin/*`: admin screens; `store.tsx` simulates workers, the upload pipeline and review state.
+- `components/admin/*`: admin screens, fed by server components under `app/admin/*`; `store.tsx` only holds toasts.
 - `app/globals.css`: design tokens and shared classes. Area styles are in `app/(site)/site.css` and `app/admin/admin.css`.
 
 Home, browse, search, series pages, the reader and the admin series/chapter screens read the database. The remaining screens still use mock data from `lib/`.
@@ -86,7 +86,23 @@ Conventions:
 - Uniqueness is case-insensitive for emails and usernames.
 - Notification links must be relative, which blocks open redirects.
 
-The AI pipeline and payment processing aren't implemented. Jobs and payments are records only, and Premium prices are fixed server-side in `server/data/billing.ts`.
+The AI pipeline isn't implemented: jobs are records that stay queued until workers exist. Premium is paid by bank transfer; readers get a reference code and an admin confirms the transfer, which extends `profiles.premium_until`. Prices are fixed server-side in `server/data/billing.ts`.
+
+### Admin
+
+| Area | Data | Audited actions |
+| --- | --- | --- |
+| Dashboard | `server/data/dashboard.ts` (series, chapters, users, jobs, reviews, payments, reports, reads per day, top series) | — |
+| Series, chapters, upload | `server/data/catalog.ts` | `series.*`, `chapter.*` (create, update, delete, publish, upload, pages) |
+| Processing, queue, review | `server/data/pipeline.ts` | `translation_job.create/retry/cancel`, `review.send_back`, `review.publish` |
+| Users & payments | `server/data/account.ts`, `billing.ts` | `user.role.grant/revoke`, `user.suspend/reactivate`, `payment.confirm/reject` |
+| Reports | `server/data/reports.ts` (readers file them from the end of a chapter) | `report.resolve/dismiss` |
+| Settings | `server/data/settings.ts` (`app_settings`, validated per key, defaults when unset) | `settings.update` with before/after values |
+| Audit log | `server/data/audit.ts` | read-only, filter by area or actor |
+
+Every admin page calls `requireAdminPage`, and every DAL function checks the role again (`requireRole`): `editor` for content and the pipeline, `translator` for segment review, `admin` for users, payments, settings and the audit log. Audit rows are written in the same transaction as the change. Suspending a user deletes their sessions. Resolving a report, confirming or rejecting a payment, and publishing a chapter notify the affected readers.
+
+`server/db/sql.ts` exports `outer()`. Use it when a correlated subquery in a select field references the outer table: Drizzle renders a bare column there as an unqualified name, which the subquery resolves against its own table.
 
 ## Authentication
 

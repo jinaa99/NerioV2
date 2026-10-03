@@ -6,7 +6,6 @@ import { ToastViewport, useToastQueue, type PushToast } from '@/components/ui';
 import { saveReaderSettingsAction, setBookmarkAction } from '@/server/actions/library';
 import type { ViewerDTO } from '@/server/auth/guards';
 
-export type PayState = 'info' | 'pending' | 'confirmed';
 export type ReaderPrefs = {
   width: 'narrow' | 'standard' | 'wide' | 'fit';
   gap: 'none' | 'small' | 'large';
@@ -16,16 +15,10 @@ export type ReaderPrefs = {
 
 /** Device-local state. Library data (bookmarks, follows, history) lives on the server. */
 type Persisted = {
-  pay: PayState;
-  plan: number;
-  payRef: string;
   reader: ReaderPrefs;
 };
 
 const DEFAULTS: Persisted = {
-  pay: 'info',
-  plan: 0,
-  payRef: '',
   reader: { width: 'standard', gap: 'none', bg: 'black', autoHide: true },
 };
 const KEY = 'nerio:site:v1';
@@ -139,7 +132,7 @@ export function SiteProvider({ viewer, bookmarkedSlugs, children }: { viewer: Vi
     apply(!bmRef.current[slug], true);
   }, [signedIn, requireSignIn, push]);
 
-  const premium = !!viewer?.premium || state.pay === 'confirmed';
+  const premium = !!viewer?.premium;
   const setSearch = useCallback((patch: Partial<SiteCtx['search']>) => setSearchState(s => ({ ...s, ...patch })), []);
   const openSearch = useCallback((genre?: string | null) => setSearchState(s => ({ open: true, query: genre !== undefined ? '' : s.query, genre: genre !== undefined ? genre : s.genre })), []);
 

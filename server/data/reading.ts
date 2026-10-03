@@ -3,6 +3,7 @@ import { and, count, desc, eq, isNull, lte, sql } from 'drizzle-orm';
 import { pagination, saveProgressInput, type Pagination, type SaveProgressInput } from '@/lib/validation';
 import { requireActor } from '../auth/actor';
 import { db } from '../db/client';
+import { outer } from '../db/sql';
 import { chapters, readingHistory, readingProgress, series } from '../db/schema';
 import { DalError, parseInput } from '../errors';
 import { imageSrc } from '../storage';
@@ -47,8 +48,8 @@ export type ContinueReadingDTO = {
 export async function listContinueReading(input: Pagination = {}): Promise<{ items: ContinueReadingDTO[]; total: number; limit: number; offset: number }> {
   const actor = await requireActor();
   const q = parseInput(pagination, input);
-  const visible = sql`c.series_id = ${readingProgress.seriesId} and c.status = 'published' and c.published_at <= now()`;
-  const next = sql<number | null>`(select min(c.number)::float8 from ${chapters} c where ${visible} and c.number > ${chapters.number})`;
+  const visible = sql`c.series_id = ${outer(readingProgress.seriesId)} and c.status = 'published' and c.published_at <= now()`;
+  const next = sql<number | null>`(select min(c.number)::float8 from ${chapters} c where ${visible} and c.number > ${outer(chapters.number)})`;
   const where = and(
     eq(readingProgress.userId, actor.userId),
     isNull(series.deletedAt),

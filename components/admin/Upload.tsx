@@ -1,170 +1,215 @@
 'use client';
 
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useRef } from 'react';
-import { Button, Icon, IconButton } from '@/components/ui';
-import { ADMIN_SERIES, STAGES, STAGE_DESC, adminSeries } from '@/lib/admin-data';
-import { useAdmin, type UploadPhase } from './store';
+import { useState, useTransition } from 'react';
+import { Button, Icon, Segmented } from '@/components/ui';
+import { chapterNo } from '@/lib/catalog';
+import { publishUploadedAction, uploadChapterAction } from '@/server/actions/admin';
+import { PIPELINE_STAGE_DESC, PIPELINE_STAGE_LABEL, PIPELINE_STAGE_ORDER } from './pipeline-ui';
+import { useAdmin } from './store';
 
-const PHASE: Record<UploadPhase, [string, string]> = {
-  form: ['WAITING FOR FILE', 'neutral'], uploading: ['UPLOADING', 'ember'], processing: ['PROCESSING', 'ember'],
-  failed: ['FAILED', 'danger'], ready: ['READY', 'info'], published: ['PUBLISHED', 'success'],
-};
-const START_LABEL: Record<UploadPhase, string> = { form: 'Upload and process', uploading: 'Uploading…', processing: 'Processing…', failed: 'Failed, see status', ready: 'Processed', published: 'Published' };
+type SeriesOption = { id: string; title: string; sourceLanguage: string; nextNumber: number };
+type Measured = { url: string; width: number; height: number };
+type Result = { chapterId: string; jobId: string | null; series: string; number: number; pages: number; mode: 'process' | 'direct'; published?: boolean };
 
-export default function Upload() {
-  const { up: u, setUp, startUpload, toast } = useAdmin();
+const SOURCES: [string, string][] = [['ko', 'Korean'], ['ja', 'Japanese'], ['zh', 'Chinese']];
+const TARGETS: [string, string][] = [['en', 'English'], ['es', 'Spanish'], ['id', 'Indonesian']];
+
+/** Load each image in the browser to read its size; the server only stores what it's given. */
+function measure(url: string): Promise<Measured> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const t = setTimeout(() => reject(new Error('timeout')), 20_000);
+    img.onload = () => { clearTimeout(t); resolve({ url, width: img.naturalWidth, height: img.naturalHeight }); };
+    img.onerror = () => { clearTimeout(t); reject(new Error('load failed')); };
+    img.src = url;
+  });
+}
+
+export default function Upload({ options, initialSeries }: { options: SeriesOption[]; initialSeries?: string }) {
+  const { toast } = useAdmin();
   const router = useRouter();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const locked = u.phase !== 'form';
-  const series = adminSeries(u.series);
-  const dup = +u.num <= series.ch;
-  const size = u.file ? (u.file.size > 1e5 ? `${(u.file.size / 1048576).toFixed(1)} MB` : '186.4 MB') : '';
+  const first = options.find(o => o.id === initialSeries) ?? options[0];
+  const [seriesId, setSeriesId] = useState(first?.id ?? '');
+  const [num, setNum] = useState(String(first?.nextNumber ?? 1));
+  const [title, setTitle] = useState('');
+  const [source, setSource] = useState(first?.sourceLanguage ?? 'ko');
+  const [target, setTarget] = useState('en');
+  const [mode, setMode] = useState<'process' | 'direct'>('process');
+  const [urls, setUrls] = useState('');
+  const [err, setErr] = useState('');
+  const [phase, setPhase] = useState<'form' | 'checking' | 'saving' | 'done'>('form');
+  const [checked, setChecked] = useState(0);
+  const [result, setResult] = useState<Result | null>(null);
+  const [publishing, startPublish] = useTransition();
+  const locked = phase !== 'form';
+  const series = options.find(o => o.id === seriesId);
+  const list = urls.split('\n').map(s => s.trim()).filter(Boolean);
 
-  const accept = (f?: File) => {
-    if (!f) return;
-    if (!/\.zip$/i.test(f.name)) return setUp({ err: `“${f.name}” isn’t a ZIP archive.`, drag: false });
-    setUp({ file: { name: f.name, size: f.size }, err: '', drag: false });
-  };
-  const start = () => {
-    if (!u.file) setUp({ file: { name: `lantern-keeper_ch${u.num}_raw.zip`, size: 0 } });
-    setTimeout(() => startUpload(), 0);
+  if (options.length === 0) {
+    return (
+      <div className="a-card stack" style={{ padding: 48, alignItems: 'center', gap: 10, textAlign: 'center' }}>
+        <Icon name="collections_bookmark" size={28} color="var(--ink-3)" />
+        <span style={{ font: '600 15px var(--sans)' }}>Create a series first</span>
+        <Link href="/admin/series/new" className="btn btn-primary" style={{ '--h': '36px', '--fs': '13px', color: 'var(--bg)' } as React.CSSProperties}>New series</Link>
+      </div>
+    );
+  }
+
+  const start = async () => {
+    setErr('');
+    const n = Number(num);
+    if (!num || !Number.isFinite(n) || n < 0) return setErr('Enter a chapter number.');
+    if (list.length === 0) return setErr('Add at least one page image URL.');
+    const bad = list.find(u => !/^https:\/\/\S+$/.test(u));
+    if (bad) return setErr(`Not an https URL: ${bad}`);
+    setPhase('checking');
+    setChecked(0);
+    const results = await Promise.allSettled(list.map(u => measure(u).finally(() => setChecked(c => c + 1))));
+    const failedIdx = results.findIndex(r => r.status === 'rejected');
+    if (failedIdx !== -1) {
+      setPhase('form');
+      return setErr(`Page ${failedIdx + 1} didn’t load: ${list[failedIdx]}`);
+    }
+    setPhase('saving');
+    const pages = results.map(r => (r as PromiseFulfilledResult<Measured>).value);
+    const res = await uploadChapterAction({ seriesId, number: n, title, sourceLanguage: source, targetLanguage: target, mode, pages });
+    if (!res.ok) {
+      setPhase('form');
+      return setErr(Object.values(res.fields ?? {})[0]?.[0] ?? res.error);
+    }
+    setResult({ chapterId: res.data!.chapterId, jobId: res.data!.jobId, series: series?.title ?? '', number: n, pages: pages.length, mode });
+    setPhase('done');
+    toast(mode === 'process' ? `Chapter ${chapterNo(n)} queued for processing` : `Chapter ${chapterNo(n)} is ready to publish`);
+    router.refresh();
   };
 
-  const [phaseLabel, phaseTone] = PHASE[u.phase];
+  const publishNow = () => result && startPublish(async () => {
+    const res = await publishUploadedAction(result.chapterId);
+    if (!res.ok) return toast(res.error, 'error', 'var(--danger)');
+    setResult({ ...result, published: true });
+    toast(`Chapter ${chapterNo(result.number)} published`);
+  });
+
+  const reset = () => {
+    setPhase('form'); setResult(null); setUrls(''); setTitle('');
+    setNum(String((result?.number ?? 0) + 1));
+  };
+
+  const status: [string, string] = phase === 'form' ? ['WAITING FOR PAGES', 'neutral'] : phase === 'checking' ? ['CHECKING PAGES', 'ember'] : phase === 'saving' ? ['SAVING', 'ember']
+    : result?.published ? ['PUBLISHED', 'success'] : result?.mode === 'process' ? ['QUEUED', 'neutral'] : ['READY', 'info'];
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,420px),1fr))', gap: 20, alignItems: 'start' }}>
       <section className="a-section" style={{ padding: 'clamp(18px,3vw,24px)', gap: 18 }}>
         <div className="stack" style={{ gap: 4 }}>
           <span style={{ font: '400 24px var(--serif)' }}>New chapter</span>
-          <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>Upload raw pages. Nerio runs OCR, translation, cleaning and typesetting automatically.</span>
+          <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>Add raw pages and queue them for OCR and translation, or add pages that are already translated.</span>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,160px),1fr))', gap: 14 }}>
           <label className="field" style={{ gridColumn: '1/-1', gap: 6 }}>
             <span className="label">Series</span>
-            <select className="a-input" value={u.series} disabled={locked} onChange={e => setUp({ series: e.target.value, num: String(adminSeries(e.target.value).ch + 1) })}>
-              {ADMIN_SERIES.map(o => <option key={o.id} value={o.id}>{o.title}</option>)}
+            <select className="a-input" value={seriesId} disabled={locked} onChange={e => {
+              const o = options.find(x => x.id === e.target.value);
+              setSeriesId(e.target.value); setNum(String(o?.nextNumber ?? 1)); setSource(o?.sourceLanguage ?? 'ko');
+            }}>
+              {options.map(o => <option key={o.id} value={o.id}>{o.title}</option>)}
             </select>
           </label>
           <label className="field" style={{ gap: 6 }}>
             <span className="label">Chapter number</span>
-            <input className="a-input mono" inputMode="numeric" value={u.num} disabled={locked} onChange={e => setUp({ num: e.target.value.replace(/[^0-9.]/g, '') })} style={{ borderColor: dup ? 'rgba(230,194,106,.5)' : undefined }} />
-            {dup && <span style={{ fontSize: 12, color: 'var(--warning-text)' }}>Chapter {u.num} already exists. Uploading replaces it.</span>}
+            <input className="a-input mono" inputMode="decimal" value={num} disabled={locked} onChange={e => setNum(e.target.value.replace(/[^0-9.]/g, ''))} />
+            {series && Number(num) > 0 && Number(num) < series.nextNumber && <span style={{ fontSize: 12, color: 'var(--warning-text)' }}>This series already has chapters up to {series.nextNumber - 1}.</span>}
           </label>
           <label className="field" style={{ gap: 6 }}>
             <span className="label">Title <span style={{ color: 'var(--ink-3)', fontWeight: 400 }}>optional</span></span>
-            <input className="a-input" value={u.title} disabled={locked} placeholder="Auto-detect" onChange={e => setUp({ title: e.target.value })} />
+            <input className="a-input" value={title} disabled={locked} maxLength={200} placeholder="Chapter N" onChange={e => setTitle(e.target.value)} />
           </label>
-          <label className="field" style={{ gap: 6 }}><span className="label">Source</span><select className="a-input" disabled={locked}><option>Korean</option><option>Japanese</option><option>Chinese</option></select></label>
-          <label className="field" style={{ gap: 6 }}><span className="label">Target</span><select className="a-input" disabled={locked}><option>English</option><option>Spanish</option><option>Indonesian</option></select></label>
+          <label className="field" style={{ gap: 6 }}><span className="label">Source</span>
+            <select className="a-input" value={source} disabled={locked || mode === 'direct'} onChange={e => setSource(e.target.value)}>
+              {[...SOURCES, ...(SOURCES.some(s => s[0] === source) ? [] : [[source, source.toUpperCase()] as [string, string]])].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </label>
+          <label className="field" style={{ gap: 6 }}><span className="label">Target</span>
+            <select className="a-input" value={target} disabled={locked || mode === 'direct'} onChange={e => setTarget(e.target.value)}>
+              {TARGETS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </label>
+          <div className="field" style={{ gridColumn: '1/-1', gap: 6 }}>
+            <span className="label">Pages</span>
+            <Segmented h={34} stretch role="radio" label="Processing" options={[['process', 'Run OCR & translation'], ['direct', 'Already translated']]} value={mode} onChange={v => !locked && setMode(v)} />
+          </div>
         </div>
 
-        {!u.file && <>
-          <div role="button" tabIndex={0} aria-label="Upload chapter ZIP" className={`dropzone ${u.drag ? 'drag' : ''}`}
-            onClick={() => fileRef.current?.click()}
-            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileRef.current?.click(); } }}
-            onDragOver={e => { e.preventDefault(); if (!u.drag) setUp({ drag: true }); }}
-            onDragLeave={() => setUp({ drag: false })}
-            onDrop={e => { e.preventDefault(); accept(e.dataTransfer.files[0]); }}>
-            <Icon name={u.drag ? 'download' : 'folder_zip'} size={32} color={u.drag ? 'var(--ember)' : 'var(--ink-2)'} />
-            <span style={{ font: '600 15px var(--sans)' }}>{u.drag ? 'Release to add' : 'Drop chapter ZIP or click to browse'}</span>
-            <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>ZIP of JPG, PNG or WEBP pages · up to 500 MB · pages sorted by filename</span>
-          </div>
-          <input ref={fileRef} type="file" accept=".zip" hidden onChange={e => accept(e.target.files?.[0])} />
-          {u.err && (
-            <div className="row" style={{ gap: 10, padding: 12, borderRadius: 10, background: 'rgba(229,103,92,.08)', border: '1px solid rgba(229,103,92,.25)', fontSize: 13, color: 'var(--danger-text)' }}>
-              <Icon name="error" size={18} />{u.err}
-            </div>
-          )}
-        </>}
-
-        {u.file && (
-          <div className="row" style={{ gap: 12, padding: '12px 14px', borderRadius: 12, background: 'var(--s2)', border: '1px solid rgba(255,255,255,.08)' }}>
-            <Icon name="folder_zip" size={26} color="var(--ink-2)" />
-            <div className="stack grow" style={{ gap: 6 }}>
-              <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                <span className="ellipsis" style={{ font: '600 14px var(--sans)' }}>{u.file.name}</span>
-                <span className="meta" style={{ flex: 'none' }}>{u.phase === 'uploading' ? `${u.uploadPct}% · ${size}` : `${size} · 48 PAGES`}</span>
-              </div>
-              <div style={{ height: 4, borderRadius: 2, background: 'var(--s4)', overflow: 'hidden' }}>
-                <div style={{ width: `${u.phase === 'form' ? 0 : u.uploadPct}%`, height: '100%', background: 'var(--ink-1)', transition: 'width .2s linear' }} />
-              </div>
-            </div>
-            {!locked && <IconButton icon="close" label="Remove file" h={32} r={8} iconSize={18} style={{ color: 'var(--ink-3)' }} onClick={() => setUp({ file: null })} />}
+        <div className="dropzone" style={{ cursor: 'default', alignItems: 'stretch', textAlign: 'left', padding: 14, gap: 8 }}>
+          <span className="row" style={{ gap: 8, font: '600 14px var(--sans)' }}><Icon name="photo_library" size={20} color="var(--ink-2)" />Page image URLs</span>
+          <textarea aria-label="Page image URLs" className="a-input mono" rows={6} disabled={locked} value={urls} onChange={e => setUrls(e.target.value)}
+            placeholder={'https://cdn.example.com/ch12/001.webp\nhttps://cdn.example.com/ch12/002.webp'} style={{ height: 'auto', padding: '10px 12px', fontSize: 12, lineHeight: 1.6, resize: 'vertical' }} />
+          <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>One https URL per line, in reading order · JPG, PNG or WEBP · up to 300 pages{list.length ? ` · ${list.length} added` : ''}</span>
+        </div>
+        {err && (
+          <div role="alert" className="row" style={{ gap: 10, padding: 12, borderRadius: 10, background: 'rgba(229,103,92,.08)', border: '1px solid rgba(229,103,92,.25)', fontSize: 13, color: 'var(--danger-text)' }}>
+            <Icon name="error" size={18} /><span style={{ wordBreak: 'break-all' }}>{err}</span>
           </div>
         )}
-
-        <label className="row" style={{ gap: 10, fontSize: 13, color: 'var(--ink-2)' }}>
-          <input type="checkbox" checked={u.simFail} disabled={locked} onChange={() => setUp({ simFail: !u.simFail })} style={{ accentColor: 'var(--ember)', width: 16, height: 16 }} />
-          Prototype: simulate an OCR failure
-        </label>
-        <Button variant="primary" h={44} fs={14} disabled={locked} onClick={start}>{START_LABEL[u.phase]}</Button>
+        <Button variant="primary" h={44} fs={14} disabled={locked} loading={phase === 'checking' || phase === 'saving'} onClick={start}>
+          {phase === 'checking' ? `Checking pages ${checked}/${list.length}…` : phase === 'saving' ? 'Saving…' : phase === 'done' ? 'Uploaded' : mode === 'process' ? 'Upload and queue processing' : 'Upload pages'}
+        </Button>
       </section>
 
       <section aria-live="polite" className="a-section" style={{ padding: 'clamp(18px,3vw,24px)', gap: 18 }}>
         <div className="row" style={{ justifyContent: 'space-between', gap: 12 }}>
           <div className="stack" style={{ gap: 2 }}>
             <span style={{ font: '600 15px var(--sans)' }}>Processing status</span>
-            <span className="meta">{u.phase === 'form' ? 'NO ACTIVE JOB' : `JOB-8822 · ${series.title.toUpperCase()} · CH. ${u.num}`}</span>
+            <span className="meta">{result ? `${result.jobId ? `JOB-${result.jobId.slice(0, 8).toUpperCase()} · ` : ''}${result.series.toUpperCase()} · CH. ${chapterNo(result.number)}` : 'NO ACTIVE JOB'}</span>
           </div>
-          <span className={`badge xs ${phaseTone}`}>{phaseLabel}</span>
+          <span className={`badge xs ${status[1]}`}>{status[0]}</span>
         </div>
         <ol className="stack" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-          {STAGES.map((name, i) => {
-            let done = false, active = false, failed = false;
-            if (u.phase === 'processing') { done = i < u.stage; active = i === u.stage; }
-            else if (u.phase === 'failed') { done = i < 1; failed = i === 1; }
-            else if (u.phase === 'ready') done = i < 7;
-            else if (u.phase === 'published') done = true;
-            const readyStep = u.phase === 'ready' && i === 7;
-            const color = done ? 'var(--success)' : failed ? 'var(--danger)' : active ? 'var(--ember)' : readyStep ? 'var(--info)' : 'var(--s4)';
+          {PIPELINE_STAGE_ORDER.map((name, i) => {
+            const direct = result?.mode === 'direct';
+            // Direct uploads skip OCR → QA: validated now, then ready, then published on demand.
+            const skipped = direct && i > 0 && i < 7;
+            const done = !!result && direct && !skipped && (name === 'validating' || !!result.published);
+            const active = !!result && !direct && i === 0;
+            const readyStep = !!result && direct && name === 'ready' && !result.published;
+            const color = done ? 'var(--success)' : active ? 'var(--ember)' : readyStep ? 'var(--info)' : 'var(--s4)';
             return (
               <li key={name} className="row" style={{ gap: 14, alignItems: 'stretch' }}>
                 <div className="stack" style={{ alignItems: 'center', width: 22, flex: 'none' }}>
-                  <span style={{ width: 22, height: 22, borderRadius: '50%', display: 'grid', placeItems: 'center', background: done || failed ? color : readyStep ? 'rgba(134,169,222,.2)' : 'transparent', border: `1.5px solid ${color}`, color: 'var(--bg)', transition: 'all .3s' }}>
+                  <span style={{ width: 22, height: 22, borderRadius: '50%', display: 'grid', placeItems: 'center', background: done ? color : readyStep ? 'rgba(134,169,222,.2)' : 'transparent', border: `1.5px solid ${color}`, color: 'var(--bg)' }}>
                     {done && <Icon name="check" size={14} style={{ fontWeight: 600 }} />}
-                    {failed && <Icon name="close" size={14} style={{ fontWeight: 600 }} />}
-                    {active && <span style={{ width: 12, height: 12, borderRadius: '50%', border: '2px solid rgba(232,130,95,.3)', borderTopColor: 'var(--ember)', animation: 'spin .8s linear infinite' }} />}
+                    {active && <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--ember)', animation: 'pulse 2s infinite' }} />}
                   </span>
-                  {i < 8 && <span style={{ flex: 1, width: 1.5, minHeight: 14, background: done ? 'var(--success)' : 'var(--s4)', transition: 'background .3s' }} />}
+                  {i < 8 && <span style={{ flex: 1, width: 1.5, minHeight: 14, background: done ? 'var(--success)' : 'var(--s4)' }} />}
                 </div>
                 <div className="stack grow" style={{ gap: 6, padding: '1px 0 14px' }}>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                    <span style={{ font: '600 12px var(--mono)', letterSpacing: '.06em', color: done ? 'var(--success-text)' : failed ? 'var(--danger-text)' : active ? 'var(--ember-text)' : readyStep ? 'var(--info-text)' : 'var(--ink-4)' }}>{name}</span>
-                    <span className="meta">{u.times[i] || (active ? `${Math.round(u.stagePct)}%` : '')}</span>
-                  </div>
-                  {(active || failed || readyStep) && <span style={{ fontSize: 13, color: failed ? 'var(--danger-text)' : 'var(--ink-2)' }}>{failed ? 'Page 31 timed out after 120s. 30 of 48 pages processed.' : STAGE_DESC[i]}</span>}
-                  {active && (
-                    <div style={{ height: 4, borderRadius: 2, background: 'var(--s4)', overflow: 'hidden' }}>
-                      <div style={{ width: `${u.stagePct}%`, height: '100%', borderRadius: 2, background: 'repeating-linear-gradient(90deg,#E8825F 0 10px,#F09A79 10px 14px)', animation: 'stripe .8s linear infinite', transition: 'width .25s linear' }} />
-                    </div>
-                  )}
-                  {failed && (
-                    <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-                      <Button variant="secondary" h={32} px={12} icon="refresh" onClick={() => startUpload(true)}>Retry from OCR</Button>
-                      <Button variant="ghost" h={32} onClick={() => toast('ocr-worker-2: page_031.jpg timeout after 120000ms', 'terminal', 'var(--ink-2)')}>View logs</Button>
-                    </div>
-                  )}
+                  <span style={{ font: '600 12px var(--mono)', letterSpacing: '.06em', color: done ? 'var(--success-text)' : active ? 'var(--ember-text)' : readyStep ? 'var(--info-text)' : 'var(--ink-4)' }}>{PIPELINE_STAGE_LABEL[name]}{skipped ? ' · SKIPPED' : ''}</span>
+                  {active && <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>Queued. {PIPELINE_STAGE_DESC[name]} starts when a processing worker picks the job up.</span>}
+                  {readyStep && <span style={{ fontSize: 13, color: 'var(--ink-2)' }}>{PIPELINE_STAGE_DESC.ready}</span>}
                 </div>
               </li>
             );
           })}
         </ol>
-        {u.phase === 'ready' && (
-          <div className="stack" style={{ gap: 12, padding: 16, borderRadius: 12, background: 'rgba(123,201,160,.06)', border: '1px solid rgba(123,201,160,.22)', animation: 'pop .3s' }}>
-            <span style={{ font: '600 14px var(--sans)' }}>Ready to publish · 3 regions flagged in QA</span>
+        {result && !result.published && (
+          <div className="stack" style={{ gap: 12, padding: 16, borderRadius: 12, background: result.mode === 'direct' ? 'rgba(123,201,160,.06)' : 'var(--s2)', border: `1px solid ${result.mode === 'direct' ? 'rgba(123,201,160,.22)' : 'var(--line-1)'}`, animation: 'pop .3s' }}>
+            <span style={{ font: '600 14px var(--sans)' }}>{result.mode === 'direct' ? `${result.pages} pages saved · ready to publish` : `${result.pages} pages saved · waiting in the processing queue`}</span>
             <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-              <Button variant="secondary" h={40} onClick={() => router.push('/admin/review')}>Review translation</Button>
-              <Button variant="primary" h={40} onClick={() => { setUp({ phase: 'published', times: [...u.times, 'now'] }); toast(`Chapter ${u.num} published`); }}>Publish now</Button>
+              <Link href={`/admin/chapters/${result.chapterId}`} className="btn btn-secondary" style={{ '--h': '40px', '--fs': '14px' } as React.CSSProperties}>Open chapter</Link>
+              {result.mode === 'direct'
+                ? <Button variant="primary" h={40} loading={publishing} onClick={publishNow}>Publish now</Button>
+                : <Link href="/admin/processing?filter=active" className="btn btn-primary" style={{ '--h': '40px', '--fs': '14px', color: 'var(--bg)' } as React.CSSProperties}>View in processing</Link>}
+              <Button variant="ghost" h={40} onClick={reset}>Upload another</Button>
             </div>
           </div>
         )}
-        {u.phase === 'published' && (
+        {result?.published && (
           <div className="row" style={{ gap: 12, padding: 16, borderRadius: 12, background: 'rgba(123,201,160,.08)', border: '1px solid rgba(123,201,160,.25)', animation: 'pop .3s' }}>
             <Icon name="check_circle" fill color="var(--success)" />
             <span className="grow" style={{ font: '600 14px var(--sans)' }}>Published. Followers are being notified.</span>
-            <Button variant="outline" h={36} px={12} onClick={() => setUp({ phase: 'form', file: null, num: String(+u.num + 1), uploadPct: 0, stage: 0, times: [] })}>Upload another</Button>
+            <Button variant="outline" h={36} px={12} onClick={reset}>Upload another</Button>
           </div>
         )}
       </section>

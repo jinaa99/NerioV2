@@ -3,7 +3,9 @@
 import Link from 'next/link';
 import { useState, type ReactNode } from 'react';
 import { Bar, Button, Cover, Icon, IconButton, Segmented, Switch, ToastViewport, useEscape, useToastQueue } from '@/components/ui';
-import { STAGES } from '@/lib/admin-data';
+import { PIPELINE_STAGE_LABEL, PIPELINE_STAGE_ORDER } from '@/components/admin/pipeline-ui';
+
+const STAGES = PIPELINE_STAGE_ORDER.map(s => PIPELINE_STAGE_LABEL[s]);
 import { cover } from '@/lib/data';
 
 const NAV: [string, string][] = [['color', 'Color'], ['type', 'Type'], ['space', 'Space & surface'], ['controls', 'Controls'], ['content', 'Cards & chapters'], ['feedback', 'Feedback'], ['reader', 'Reader'], ['admin', 'Admin'], ['motion', 'Motion']];
