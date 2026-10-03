@@ -1,6 +1,7 @@
 import { relations } from 'drizzle-orm';
 import { bookmarks, follows, notifications, readingHistory, readingProgress } from './activity';
 import { adminAuditLogs } from './audit';
+import { oauthAccounts, sessions } from './auth';
 import { paymentRecords } from './billing';
 import { chapterPages, chapters, characters, genres, glossaryTerms, series, seriesGenres } from './catalog';
 import { profiles, roles, userRoles, users } from './identity';
@@ -15,6 +16,16 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   readingHistory: many(readingHistory),
   notifications: many(notifications),
   payments: many(paymentRecords, { relationName: 'payer' }),
+  sessions: many(sessions),
+  oauthAccounts: many(oauthAccounts),
+}));
+
+export const oauthAccountsRelations = relations(oauthAccounts, ({ one }) => ({
+  user: one(users, { fields: [oauthAccounts.userId], references: [users.id] }),
+}));
+
+export const sessionsRelations = relations(sessions, ({ one }) => ({
+  user: one(users, { fields: [sessions.userId], references: [users.id] }),
 }));
 
 export const profilesRelations = relations(profiles, ({ one }) => ({

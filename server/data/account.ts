@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { requireActor, requireRole, type RoleKey } from '../auth/actor';
 import { db } from '../db/client';
 import { profiles, roles, userRoles, users } from '../db/schema';
-import { DalError, parseInput } from '../errors';
+import { DalError, parseInput, rethrowUnique } from '../errors';
 import { recordAudit } from './audit';
 
 const profileColumns = {
@@ -30,7 +30,12 @@ export async function updateMyProfile(input: UpdateProfileInput) {
   const actor = await requireActor();
   const data = parseInput(updateProfileInput, input);
   if (Object.keys(data).length === 0) return;
-  await db().update(profiles).set(data).where(eq(profiles.userId, actor.userId));
+  // Always scoped to the caller: there is no user id parameter to tamper with.
+  try {
+    await db().update(profiles).set(data).where(eq(profiles.userId, actor.userId));
+  } catch (err) {
+    rethrowUnique(err, 'That username is taken.');
+  }
 }
 
 /** Public profile by username: no email, no premium state. */

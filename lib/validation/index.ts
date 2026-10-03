@@ -9,7 +9,8 @@ export const slug = z.string().trim().toLowerCase().min(1).max(96).regex(/^[a-z0
 export const languageTag = z.string().trim().min(2).max(16).regex(/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$/, 'Use a BCP-47 tag like ko or zh-Hant');
 export const hue = z.number().int().min(0).max(360);
 /** Relative in-app path only; blocks `//host` and `/\host` open redirects. */
-export const relativeHref = z.string().max(500).regex(/^\/([^/\\]|$)/, 'Must be a relative path');
+// Browsers strip tabs/newlines from URLs, so `/\t/evil.com` would become `//evil.com`: reject all whitespace and backslashes.
+export const relativeHref = z.string().max(500).regex(/^\/(?![/\\])[^\s\\]*$/, 'Must be a relative path');
 
 export const pagination = z.object({
   limit: z.number().int().min(1).max(100).default(24),
@@ -31,7 +32,8 @@ export const readerSettings = z.object({
 }).partial().strict();
 
 export const updateProfileInput = z.object({
-  displayName: z.string().trim().min(1).max(64),
+  displayName: z.string().trim().min(1, 'Enter your name').max(64),
+  username,
   bio: z.string().trim().max(500).nullable(),
   locale: languageTag,
   readerSettings,
@@ -41,6 +43,35 @@ export const updateProfileInput = z.object({
 export type UpdateProfileInput = z.input<typeof updateProfileInput>;
 
 export const roleKey = z.enum(['reader', 'translator', 'editor', 'admin']);
+
+/* Auth */
+
+/** NIST 800-63B style: length over composition rules. The upper bound caps hashing cost. */
+export const password = z.string()
+  .min(8, 'Use at least 8 characters')
+  .max(128, 'Use at most 128 characters')
+  .refine(p => p.trim().length > 0, 'Password can’t be only spaces');
+
+export const registerInput = z.object({
+  displayName: z.string().trim().min(1, 'Enter your name').max(64),
+  username,
+  email,
+  password,
+}).strict();
+export type RegisterInput = z.input<typeof registerInput>;
+
+/** Login never reveals which field was wrong, so only basic shape checks here. */
+export const loginInput = z.object({
+  email: z.string().trim().toLowerCase().min(1, 'Enter your email').max(320),
+  password: z.string().min(1, 'Enter your password').max(128),
+}).strict();
+export type LoginInput = z.input<typeof loginInput>;
+
+/** Post-login redirect target. Anything that isn't a same-site path falls back to `/`. */
+export const safeNextPath = (value: unknown): string => {
+  const parsed = relativeHref.safeParse(value);
+  return parsed.success && !parsed.data.startsWith('/login') && !parsed.data.startsWith('/register') ? parsed.data : '/';
+};
 
 /* Catalog */
 

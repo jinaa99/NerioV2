@@ -24,7 +24,7 @@ function currentKey(path: string): Key {
   return (seg || 'overview') as Key;
 }
 
-export default function AdminShell({ children }: { children: ReactNode }) {
+export default function AdminShell({ initials, children }: { initials: string; children: ReactNode }) {
   const path = usePathname();
   const key = currentKey(path);
   const { jobs, pays, reports } = useAdmin();
@@ -92,7 +92,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
           <Link href="/admin/upload" className="btn btn-primary" style={{ '--h': '36px', '--px': '12px', '--r': '9px', '--fs': '13px', gap: 6, color: 'var(--bg)' } as React.CSSProperties}>
             <Icon name="upload" size={18} /><span className="admin-wide">Upload chapter</span>
           </Link>
-          <span style={{ width: 34, height: 34, flex: 'none', borderRadius: '50%', background: 'oklch(.38 .06 200)', display: 'grid', placeItems: 'center', font: '600 13px var(--sans)' }}>JW</span>
+          <span style={{ width: 34, height: 34, flex: 'none', borderRadius: '50%', background: 'oklch(.38 .06 200)', display: 'grid', placeItems: 'center', font: '600 13px var(--sans)' }}>{initials}</span>
         </header>
         <main className="stack" style={{ flex: 1, padding: 'clamp(16px,3vw,32px)', gap: 24, maxWidth: 1600, width: '100%' }}>
           <div key={path} className="stack" style={{ gap: 24, animation: 'rise .3s var(--ease)' }}>{children}</div>

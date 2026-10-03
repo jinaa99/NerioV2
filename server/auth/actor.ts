@@ -4,19 +4,23 @@ import { cache } from 'react';
 import { db } from '../db/client';
 import { roles, userRoles, users } from '../db/schema';
 import { DalError } from '../errors';
+import { validateSessionCookie } from './session';
 
 export type RoleKey = (typeof roles.$inferSelect)['key'];
 
 /** The authenticated caller. Built server-side only, never from client input. */
-export type Actor = { userId: string; roles: ReadonlySet<RoleKey> };
+export type Actor = { userId: string; roles: ReadonlySet<RoleKey>; sessionId?: string };
 
 /**
- * Resolve the current request's actor.
- * Authentication isn't implemented yet, so this always returns null and every protected
- * DAL call rejects with UNAUTHENTICATED. Wire the session lookup in here when auth lands
- * (read the session cookie, verify it, then call `loadActor(userId)`).
+ * Resolve the current request's actor from the session cookie. Memoized per request.
+ * Roles always come from the database, never from the cookie or client input.
  */
-export const getCurrentActor = cache(async (): Promise<Actor | null> => null);
+export const getCurrentActor = cache(async (): Promise<Actor | null> => {
+  const session = await validateSessionCookie();
+  if (!session) return null;
+  const actor = await loadActor(session.userId);
+  return actor && { ...actor, sessionId: session.sessionId };
+});
 
 /** Load an active user's roles. Suspended or deleted users resolve to null. */
 export async function loadActor(userId: string): Promise<Actor | null> {

@@ -29,7 +29,14 @@ export function parseInput<S extends z.ZodType>(schema: S, input: unknown): z.ou
 
 /** Postgres unique violation → CONFLICT. Anything else is rethrown untouched. */
 export function rethrowUnique(err: unknown, message: string): never {
-  const code = (err as { code?: string; cause?: { code?: string } })?.code ?? (err as { cause?: { code?: string } })?.cause?.code;
-  if (code === '23505') throw new DalError('CONFLICT', message);
+  if (uniqueViolation(err) !== null) throw new DalError('CONFLICT', message);
   throw err;
+}
+
+/** Name of the violated unique constraint/index, if `err` is a Postgres unique violation (23505). */
+export function uniqueViolation(err: unknown): string | null {
+  for (let e = err as { code?: string; constraint_name?: string; constraint?: string; cause?: unknown } | undefined; e; e = e.cause as typeof e) {
+    if (e.code === '23505') return e.constraint_name ?? e.constraint ?? '';
+  }
+  return null;
 }

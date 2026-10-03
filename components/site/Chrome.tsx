@@ -2,12 +2,13 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useTransition } from 'react';
 import { Icon, IconButton, useEscape } from '@/components/ui';
 import { GENRES, SERIES, cover } from '@/lib/data';
+import { logoutAction } from '@/server/actions/auth';
 import { useSite } from './store';
 
-function Logo() {
+export function Logo() {
   return (
     <Link href="/" aria-label="Nerio home" className="row" style={{ gap: 10, padding: 4, marginLeft: -4, borderRadius: 8 }}>
       <span style={{ width: 26, height: 26, borderRadius: 8, background: 'var(--ink-1)', display: 'grid', placeItems: 'center' }}>
@@ -23,6 +24,8 @@ export function Header() {
   const path = usePathname();
   const router = useRouter();
   const [menu, setMenu] = useState(false);
+  const [, startTransition] = useTransition();
+  const viewer = site.viewer;
   const menuRef = useRef<HTMLDivElement>(null);
   useEscape(() => setMenu(false), menu);
   useEffect(() => {
@@ -45,8 +48,9 @@ export function Header() {
     ['history', 'History', () => go('/profile?tab=history')],
     ['workspace_premium', site.premium ? 'Premium · active' : 'Get Premium', () => go('/premium')],
     ['settings', 'Settings', () => go('/profile?tab=settings')],
-    ['admin_panel_settings', 'Admin dashboard', () => go('/admin')],
-    ['logout', 'Sign out', () => { setMenu(false); site.toast('Signed out (prototype)', 'logout', 'var(--ink-2)'); }],
+    // Display hint only; /admin is enforced server-side.
+    ...(viewer?.isAdmin ? [['admin_panel_settings', 'Admin dashboard', () => go('/admin')] as [string, string, () => void]] : []),
+    ['logout', 'Sign out', () => { setMenu(false); startTransition(() => logoutAction()); }],
   ];
 
   return (
@@ -66,13 +70,16 @@ export function Header() {
           <span className="kbd">/</span>
         </button>
         {!site.premium && <Link href="/premium" className="premium-pill not-mobile">Premium</Link>}
-        <div ref={menuRef} style={{ position: 'relative' }}>
-          <button type="button" className="avatar-btn" aria-label="Account menu" aria-expanded={menu} onClick={() => setMenu(m => !m)}>H</button>
+        {!viewer && (
+          <Link href={`/login?next=${encodeURIComponent(path)}`} className="btn btn-secondary" style={{ '--h': '38px', '--px': '14px', '--r': '10px', '--fs': '14px' } as React.CSSProperties}>Sign in</Link>
+        )}
+        {viewer && <div ref={menuRef} style={{ position: 'relative' }}>
+          <button type="button" className="avatar-btn" aria-label="Account menu" aria-expanded={menu} onClick={() => setMenu(m => !m)}>{viewer.initials}</button>
           {menu && (
             <div role="menu" className="menu" style={{ position: 'absolute', right: 0, top: 50, width: 248, zIndex: 40 }}>
               <div className="stack" style={{ padding: '12px 12px 14px', gap: 2, borderBottom: '1px solid var(--line-1)', marginBottom: 6 }}>
-                <span style={{ font: '600 15px var(--sans)' }}>Hana Seo</span>
-                <span className="meta">@hana.reads · {site.premium ? 'PREMIUM' : 'FREE'}</span>
+                <span style={{ font: '600 15px var(--sans)' }}>{viewer.displayName}</span>
+                <span className="meta">@{viewer.username} · {site.premium ? 'PREMIUM' : 'FREE'}</span>
               </div>
               {items.map(([icon, label, fn]) => (
                 <button key={label} type="button" role="menuitem" className="menu-item" onClick={fn}>
@@ -81,7 +88,7 @@ export function Header() {
               ))}
             </div>
           )}
-        </div>
+        </div>}
       </div>
     </header>
   );

@@ -1,5 +1,6 @@
 export * from './enums';
 export * from './identity';
+export * from './auth';
 export * from './catalog';
 export * from './activity';
 export * from './translation';

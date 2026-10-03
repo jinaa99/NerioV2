@@ -2,9 +2,10 @@
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useState } from 'react';
+import { useActionState, useEffect, useTransition } from 'react';
 import { Bar, Button, Cover, Icon, IconButton, SwitchRow } from '@/components/ui';
 import { CONTINUE, SERIES, cover, freeLatest, getSeries } from '@/lib/data';
+import { logoutOtherDevicesAction, updateAccountAction, type FormState } from '@/server/actions/auth';
 import { useSite } from './store';
 
 const TABS = ['overview', 'bookmarks', 'history', 'following', 'achievements', 'settings'] as const;
@@ -22,13 +23,25 @@ const PREF_LABELS: [string, string][] = [
   ['Show reading activity on profile', 'Visible to people you follow'],
 ];
 
-export default function Profile() {
+type Account = { email: string; displayName: string; username: string };
+
+export default function Profile({ account }: { account: Account }) {
   const site = useSite();
   const router = useRouter();
   const param = useSearchParams().get('tab');
   const tab: Tab = (TABS as readonly string[]).includes(param ?? '') ? (param as Tab) : 'overview';
   const setTab = (t: Tab) => router.replace(t === 'overview' ? '/profile' : `/profile?tab=${t}`, { scroll: false });
-  const [saving, setSaving] = useState(false);
+  const [saved, saveAction, saving] = useActionState<FormState, FormData>(updateAccountAction, {});
+  const [signingOut, startSignOut] = useTransition();
+  const viewer = site.viewer;
+  const name = viewer?.displayName ?? account.displayName;
+  const handle = viewer?.username ?? account.username;
+  const { toast } = site;
+  useEffect(() => {
+    if (saved.ok) toast('Account updated');
+    else if (saved.error) toast(saved.error, 'error', 'var(--danger)');
+  }, [saved, toast]);
+  const fieldError = (k: string) => saved.fields?.[k]?.[0];
 
   const achievements: [string, string, string, number][] = [
     ['local_fire_department', 'Night owl', 'Read after midnight 10 times', 1], ['auto_stories', 'Bookworm', 'Read 1,000 chapters', 1], ['calendar_month', '3-week streak', 'Read every day for 21 days', 1],
@@ -41,13 +54,13 @@ export default function Profile() {
   return (
     <div className="page-anim stack" style={{ maxWidth: 1200, margin: '0 auto', padding: 'clamp(28px,5vw,64px) var(--gutter) 64px', gap: 'clamp(28px,4vw,44px)' }}>
       <div className="row" style={{ gap: 'clamp(16px,3vw,28px)', flexWrap: 'wrap' }}>
-        <div style={{ width: 'clamp(72px,10vw,112px)', aspectRatio: '1', borderRadius: '50%', background: 'oklch(.38 .06 40)', display: 'grid', placeItems: 'center', font: '400 clamp(32px,4vw,48px) var(--serif)', outline: '1px solid rgba(255,255,255,.14)', outlineOffset: 4 }}>H</div>
+        <div style={{ width: 'clamp(72px,10vw,112px)', aspectRatio: '1', borderRadius: '50%', background: 'oklch(.38 .06 40)', display: 'grid', placeItems: 'center', font: '400 clamp(32px,4vw,48px) var(--serif)', outline: '1px solid rgba(255,255,255,.14)', outlineOffset: 4 }}>{viewer?.initials ?? name[0]?.toUpperCase()}</div>
         <div className="stack" style={{ flex: '1 1 220px', gap: 6 }}>
           <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-            <h1 style={{ font: '400 clamp(30px,4vw,44px)/1 var(--serif)', letterSpacing: '-.02em' }}>Hana Seo</h1>
+            <h1 style={{ font: '400 clamp(30px,4vw,44px)/1 var(--serif)', letterSpacing: '-.02em' }}>{name}</h1>
             <span className={`badge ${site.premium ? 'ember' : 'neutral'}`}>{site.premium ? 'PREMIUM' : 'FREE'}</span>
           </div>
-          <span style={{ font: '400 13px var(--mono)', color: 'var(--ink-3)' }}>@hana.reads · READING SINCE MARCH 2025</span>
+          <span style={{ font: '400 13px var(--mono)', color: 'var(--ink-3)' }}>@{handle}{viewer ? ` · READING SINCE ${viewer.memberSince}` : ''}</span>
         </div>
         <Button variant="secondary" icon="edit" fs={14} onClick={() => setTab('settings')}>Edit profile</Button>
       </div>
@@ -197,17 +210,23 @@ export default function Profile() {
 
       {tab === 'settings' && (
         <div className="stack" style={{ gap: 20, maxWidth: 720, animation: 'fade .25s' }}>
-          <div className="panel stack" style={{ gap: 18 }}>
+          <form action={saveAction} className="panel stack" style={{ gap: 18 }}>
             <span style={{ font: '400 22px var(--serif)' }}>Account</span>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,240px),1fr))', gap: 16 }}>
-              <label className="field"><span className="label">Display name</span><input className="input" defaultValue="Hana Seo" /></label>
-              <label className="field"><span className="label">Username</span><input className="input mono" defaultValue="hana.reads" /></label>
-              <label className="field" style={{ gridColumn: '1/-1' }}><span className="label">Email</span><input className="input" type="email" defaultValue="hana@example.com" /></label>
+              <label className="field"><span className="label">Display name</span>
+                <input className={`input ${fieldError('displayName') ? 'invalid' : ''}`} name="displayName" required maxLength={64} defaultValue={saved.values?.displayName ?? account.displayName} aria-invalid={!!fieldError('displayName')} />
+                {fieldError('displayName') && <span style={{ fontSize: 13, color: 'var(--danger-text)' }}>{fieldError('displayName')}</span>}
+              </label>
+              <label className="field"><span className="label">Username</span>
+                <input className={`input mono ${fieldError('username') ? 'invalid' : ''}`} name="username" required minLength={3} maxLength={32} pattern="[A-Za-z0-9_.]{3,32}" defaultValue={saved.values?.username ?? account.username} aria-invalid={!!fieldError('username')} />
+                {fieldError('username') && <span style={{ fontSize: 13, color: 'var(--danger-text)' }}>{fieldError('username')}</span>}
+              </label>
+              <label className="field" style={{ gridColumn: '1/-1' }}><span className="label">Email</span><input className="input" type="email" value={account.email} readOnly aria-readonly /></label>
             </div>
             <div className="row" style={{ justifyContent: 'flex-end' }}>
-              <Button variant="primary" fs={14} loading={saving} onClick={() => { setSaving(true); setTimeout(() => { setSaving(false); site.toast('Account updated'); }, 700); }}>{saving ? 'Saving…' : 'Save changes'}</Button>
+              <Button type="submit" variant="primary" fs={14} loading={saving} disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</Button>
             </div>
-          </div>
+          </form>
           <div className="panel stack" style={{ gap: 6 }}>
             <span style={{ font: '400 22px var(--serif)', marginBottom: 8 }}>Preferences</span>
             {PREF_LABELS.map(([label, desc], i) => (
@@ -217,7 +236,10 @@ export default function Profile() {
           </div>
           <div className="row" style={{ padding: 'clamp(18px,3vw,28px)', borderRadius: 20, border: '1px solid rgba(229,103,92,.2)', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
             <div className="stack" style={{ gap: 4 }}><span style={{ font: '600 15px var(--sans)' }}>Sign out everywhere</span><span style={{ fontSize: 13, color: 'var(--ink-3)' }}>Ends sessions on all devices. Progress stays synced.</span></div>
-            <Button variant="danger" fs={14} onClick={() => site.toast('Signed out of 3 other devices', 'logout', 'var(--ink-2)')}>Sign out</Button>
+            <Button variant="danger" fs={14} loading={signingOut} disabled={signingOut} onClick={() => startSignOut(async () => {
+              const { count } = await logoutOtherDevicesAction();
+              site.toast(count ? `Signed out of ${count} other device${count === 1 ? '' : 's'}` : 'No other devices were signed in', 'logout', 'var(--ink-2)');
+            })}>Sign out</Button>
           </div>
         </div>
       )}

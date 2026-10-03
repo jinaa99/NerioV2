@@ -1,7 +1,7 @@
 import 'server-only';
 import { desc, eq } from 'drizzle-orm';
-import { headers } from 'next/headers';
 import { requireRole, type Actor } from '../auth/actor';
+import { requestMeta } from '../auth/request';
 import { db, type Executor } from '../db/client';
 import { adminAuditLogs } from '../db/schema';
 import { pagination, uuid, type Pagination } from '@/lib/validation';
@@ -11,15 +11,7 @@ type AuditEntry = { action: string; targetType: string; targetId?: string | null
 
 /** Write an audit row. Call inside the same transaction as the change so both commit or neither does. */
 export async function recordAudit(tx: Executor, actor: Actor | null, entry: AuditEntry) {
-  let ipAddress: string | null = null;
-  let userAgent: string | null = null;
-  try {
-    const h = await headers();
-    ipAddress = h.get('x-forwarded-for')?.split(',')[0]?.trim().slice(0, 64) ?? null;
-    userAgent = h.get('user-agent')?.slice(0, 500) ?? null;
-  } catch {
-    // Outside a request (scripts, background jobs): no headers available.
-  }
+  const { ipAddress, userAgent } = await requestMeta();
   await tx.insert(adminAuditLogs).values({
     actorId: actor?.userId ?? null,
     action: entry.action,

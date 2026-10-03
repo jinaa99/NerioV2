@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ToastViewport, useToastQueue, type PushToast } from '@/components/ui';
 import { getSeries, type Series } from '@/lib/data';
+import type { ViewerDTO } from '@/server/auth/guards';
 
 export type PayState = 'info' | 'pending' | 'confirmed';
 export type ReaderPrefs = {
@@ -35,6 +36,8 @@ const DEFAULTS: Persisted = {
 const KEY = 'nerio:site:v1';
 
 type SiteCtx = Persisted & {
+  /** Signed-in user from the server session; null when signed out. */
+  viewer: ViewerDTO | null;
   premium: boolean;
   set: (patch: Partial<Persisted> | ((s: Persisted) => Partial<Persisted>)) => void;
   setReader: (patch: Partial<ReaderPrefs>) => void;
@@ -56,7 +59,7 @@ export function useSite() {
   return c;
 }
 
-export function SiteProvider({ children }: { children: ReactNode }) {
+export function SiteProvider({ viewer, children }: { viewer: ViewerDTO | null; children: ReactNode }) {
   const [state, setState] = useState<Persisted>(DEFAULTS);
   const [hydrated, setHydrated] = useState(false);
   const [search, setSearchState] = useState({ open: false, query: '', genre: null as string | null });
@@ -93,14 +96,14 @@ export function SiteProvider({ children }: { children: ReactNode }) {
     );
   }, [push]);
 
-  const premium = state.pay === 'confirmed';
+  const premium = !!viewer?.premium || state.pay === 'confirmed';
   const isLocked = useCallback((s: Series, n: number) => !premium && n > s.ch - s.early, [premium]);
   const setSearch = useCallback((patch: Partial<SiteCtx['search']>) => setSearchState(s => ({ ...s, ...patch })), []);
   const openSearch = useCallback((genre?: string | null) => setSearchState(s => ({ open: true, query: genre !== undefined ? '' : s.query, genre: genre !== undefined ? genre : s.genre })), []);
 
   const value = useMemo<SiteCtx>(() => ({
-    ...state, premium, set, setReader, toggleBookmark, isLocked, toast: push, toastBottom, setToastBottom, search, openSearch, setSearch,
-  }), [state, premium, set, setReader, toggleBookmark, isLocked, push, toastBottom, search, openSearch, setSearch]);
+    ...state, viewer, premium, set, setReader, toggleBookmark, isLocked, toast: push, toastBottom, setToastBottom, search, openSearch, setSearch,
+  }), [state, viewer, premium, set, setReader, toggleBookmark, isLocked, push, toastBottom, search, openSearch, setSearch]);
 
   return (
     <Ctx.Provider value={value}>
