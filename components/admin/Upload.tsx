@@ -200,9 +200,9 @@ export default function Upload({ options, initialSeries }: { options: SeriesOpti
         <ol className="stack" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
           {PIPELINE_STAGE_ORDER.map((name, i) => {
             const direct = result?.mode === 'direct';
-            // Direct uploads skip OCR → QA: validated now, then ready, then published on demand.
-            const skipped = direct && i > 0 && i < 7;
-            const done = !!result && direct && !skipped && (name === 'validating' || !!result.published);
+            // Direct translated uploads already contain delivery pages, so server validation hands them to review/publish.
+            const skipped = direct && i > 2 && i < PIPELINE_STAGE_ORDER.length - 3;
+            const done = !!result && direct && !skipped && (name === 'validating' || name === 'processing_images' || !!result.published);
             const active = !!result && !direct && i === 0;
             const readyStep = !!result && direct && name === 'ready' && !result.published;
             const color = done ? 'var(--success)' : active ? 'var(--ember)' : readyStep ? 'var(--info)' : 'var(--s4)';
@@ -213,7 +213,7 @@ export default function Upload({ options, initialSeries }: { options: SeriesOpti
                     {done && <Icon name="check" size={14} style={{ fontWeight: 600 }} />}
                     {active && <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--ember)', animation: 'pulse 2s infinite' }} />}
                   </span>
-                  {i < 8 && <span style={{ flex: 1, width: 1.5, minHeight: 14, background: done ? 'var(--success)' : 'var(--s4)' }} />}
+                  {i < PIPELINE_STAGE_ORDER.length - 1 && <span style={{ flex: 1, width: 1.5, minHeight: 14, background: done ? 'var(--success)' : 'var(--s4)' }} />}
                 </div>
                 <div className="stack grow" style={{ gap: 6, padding: '1px 0 14px' }}>
                   <span style={{ font: '600 12px var(--mono)', letterSpacing: '.06em', color: done ? 'var(--success-text)' : active ? 'var(--ember-text)' : readyStep ? 'var(--info-text)' : 'var(--ink-4)' }}>{PIPELINE_STAGE_LABEL[name]}{skipped ? ' · SKIPPED' : ''}</span>

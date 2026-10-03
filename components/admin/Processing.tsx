@@ -11,8 +11,8 @@ import type { JobDTO, JobFilter } from '@/server/data/pipeline';
 import { JOB_TONE, PIPELINE_STAGE_LABEL, PIPELINE_STAGE_ORDER, PIPELINE_STAGE_SHORT } from './pipeline-ui';
 import { useAdmin } from './store';
 
-type Counts = { queued: number; running: number; failed: number; ready: number; cancelled: number };
-const FILTERS: [JobFilter, string][] = [['active', 'Active'], ['failed', 'Failed'], ['ready', 'Ready'], ['cancelled', 'Cancelled'], ['all', 'All']];
+type Counts = { queued: number; running: number; failed: number; ready: number; published: number; cancelled: number };
+const FILTERS: [JobFilter, string][] = [['active', 'Active'], ['failed', 'Failed'], ['ready', 'Ready'], ['published', 'Published'], ['cancelled', 'Cancelled'], ['all', 'All']];
 
 export default function Processing({ data, filter, counts, paused }: { data: { items: JobDTO[]; total: number; limit: number; offset: number }; filter: JobFilter; counts: Counts; paused: boolean }) {
   const { toast } = useAdmin();
@@ -25,10 +25,12 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
     setBusy(j.id);
     startTransition(async () => {
       let res: { ok: boolean; error?: string };
+      let autoPublished = false;
       try {
         if (kind === 'run') {
           const response = await fetch(`/api/admin/pipeline/${j.id}/run`, { method: 'POST' });
           const data = await response.json();
+          autoPublished = response.ok && data.autoPublished === true;
           res = response.ok ? { ok: true } : { ok: false, error: data.error ?? 'Translation job failed.' };
         } else res = await (kind === 'retry' ? retryJobAction(j.id) : cancelJobAction(j.id));
       } catch {
@@ -37,12 +39,12 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
       }
       setBusy(null);
       if (!res.ok) return toast(res.error ?? 'Pipeline action failed.', 'error', 'var(--danger)');
-      toast(kind === 'run' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} processed` : kind === 'retry' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} queued again` : 'Job cancelled', kind === 'cancel' ? 'block' : 'refresh', 'var(--info)');
+      toast(kind === 'run' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} ${autoPublished ? 'published after QA' : 'sent for review'}` : kind === 'retry' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} queued again` : 'Job cancelled', kind === 'cancel' ? 'block' : 'refresh', 'var(--info)');
       router.refresh();
     });
   };
 
-  const tiles: [string, number, string][] = [['QUEUED', counts.queued, 'var(--ink-3)'], ['RUNNING', counts.running, 'var(--ember)'], ['FAILED', counts.failed, 'var(--danger)'], ['READY', counts.ready, 'var(--info)']];
+  const tiles: [string, number, string][] = [['QUEUED', counts.queued, 'var(--ink-3)'], ['RUNNING', counts.running, 'var(--ember)'], ['READY', counts.ready, 'var(--info)'], ['PUBLISHED', counts.published, 'var(--success)'], ['FAILED', counts.failed, 'var(--danger)']];
 
   return (
     <div className="stack" style={{ gap: 12 }}>
@@ -56,7 +58,7 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
       </div>
       <div className="row" style={{ gap: 10, padding: '10px 14px', borderRadius: 12, border: '1px solid var(--line-1)', fontSize: 13, color: 'var(--ink-3)' }}>
         <Icon name="info" size={18} />
-        {paused ? 'The pipeline is paused in Settings. Queued jobs wait until it is resumed.' : 'Run a queued job to detect Korean text, build context, translate into Mongolian and check QA flags.'}
+        {paused ? 'The pipeline is paused in Settings. Queued jobs wait until it is resumed.' : 'Run a queued chapter through image validation, OCR, Mongolian translation, cleanup, typesetting and QA. Clean results publish automatically; flagged results stay in review.'}
       </div>
       <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
         <div style={{ overflowX: 'auto' }}>
@@ -77,7 +79,7 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
         {data.items.map(j => {
           const isFailed = j.status === 'failed';
           const stageIdx = PIPELINE_STAGE_ORDER.indexOf(j.stage);
-          const label = j.status === 'running' ? `${PIPELINE_STAGE_LABEL[j.stage]} · ${j.stageProgress}%` : j.status === 'queued' ? `QUEUED · ${PIPELINE_STAGE_LABEL[j.stage]}` : j.status.toUpperCase();
+          const label = j.stage === 'published' ? 'PUBLISHED' : j.status === 'running' ? `${PIPELINE_STAGE_LABEL[j.stage]} · ${j.stageProgress}%` : j.status === 'queued' ? `QUEUED · ${PIPELINE_STAGE_LABEL[j.stage]}` : j.status.toUpperCase();
           return (
             <div key={j.id} className="a-card stack" style={{ padding: 16, borderRadius: 14, gap: 14, borderColor: isFailed ? 'rgba(229,103,92,.25)' : undefined }}>
               <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
@@ -90,11 +92,11 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
                 </div>
                 <span className={`badge xs ${JOB_TONE[j.status]}`} style={{ padding: '4px 8px', borderRadius: 6 }}>{label}</span>
                 {(isFailed || j.status === 'cancelled') && <Button variant="secondary" h={32} px={12} icon="refresh" loading={busy === j.id} onClick={() => act(j, 'retry')}>Retry</Button>}
-                {j.status === 'queued' && <Button variant="primary" h={32} px={12} icon="play_arrow" disabled={paused} loading={busy === j.id} onClick={() => act(j, 'run')}>Run translation</Button>}
+                {j.status === 'queued' && <Button variant="primary" h={32} px={12} icon="play_arrow" disabled={paused} loading={busy === j.id} onClick={() => act(j, 'run')}>Run pipeline</Button>}
                 {(j.status === 'running' || j.status === 'queued') && <Button variant="ghost" h={32} loading={busy === j.id} onClick={() => { if (confirm('Cancel this job? The chapter returns to draft.')) act(j, 'cancel'); }}>Cancel</Button>}
                 {j.status === 'ready' && j.chapter.status === 'in_review' && <Link href={`/admin/review/${j.id}`} className="btn btn-secondary" style={{ '--h': '32px', '--px': '12px', '--fs': '13px' } as React.CSSProperties}>Review</Link>}
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(9,minmax(0,1fr))', gap: 4 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(11,minmax(0,1fr))', gap: 4 }}>
                 {PIPELINE_STAGE_ORDER.map((name, i) => {
                   const cur = i === stageIdx;
                   const done = i < stageIdx || (j.status === 'ready' && i <= stageIdx && name !== 'ready');
@@ -113,6 +115,11 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
                   {[j.errorCode, j.errorMessage].filter(Boolean).join(' · ')}
                 </div>
               )}
+              {!!j.logs.length && <div className="stack" style={{ gap: 4, borderTop: '1px solid var(--line-1)', paddingTop: 8 }} aria-label="Processing log">
+                {j.logs.slice(-4).map((entry, index) => <span key={`${entry.createdAt.toISOString()}-${index}`} style={{ font: '400 11px var(--mono)', color: entry.level === 'error' ? 'var(--danger-text)' : 'var(--ink-3)' }}>
+                  {entry.stage.toUpperCase()} · {entry.message}
+                </span>)}
+              </div>}
             </div>
           );
         })}

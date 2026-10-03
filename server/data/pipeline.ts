@@ -10,14 +10,14 @@ import { z } from 'zod';
 import { requireRole } from '../auth/actor';
 import { db } from '../db/client';
 import { outer } from '../db/sql';
-import { chapterPages, chapters, series, translationJobs, translationSegments } from '../db/schema';
+import { chapterPages, chapters, series, translationJobLogs, translationJobs, translationSegments } from '../db/schema';
 import { DalError, parseInput } from '../errors';
 import { imageSrc } from '../storage';
 import { recordAudit } from './audit';
 import { notifyFollowers } from './catalog';
-import { runTranslationJob } from '../ai/runner';
+import { rerenderReviewedPage, runTranslationJob } from '../ai/runner';
 
-export const PIPELINE_STAGES = ['validating', 'extracting', 'sorting', 'validating_images', 'optimizing_images', 'uploading', 'creating_records', 'ocr', 'context_building', 'translating', 'cleaning', 'typesetting', 'optimizing', 'qa', 'ready', 'published'] as const;
+export const PIPELINE_STAGES = ['queued', 'validating', 'processing_images', 'ocr', 'translating', 'cleaning', 'typesetting', 'qa', 'ready', 'published', 'failed'] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 export type JobStatus = 'queued' | 'running' | 'failed' | 'ready' | 'cancelled';
 type Paged<T> = { items: T[]; total: number; limit: number; offset: number };
@@ -28,16 +28,18 @@ export type JobDTO = {
   id: string; status: JobStatus; stage: PipelineStage; stageProgress: number; attempt: number; priority: number;
   errorCode: string | null; errorMessage: string | null; sourceLanguage: string; targetLanguage: string;
   createdAt: Date; startedAt: Date | null; finishedAt: Date | null;
+  logs: { stage: PipelineStage; level: string; message: string; createdAt: Date }[];
   chapter: { id: string; number: number; status: string; pageCount: number };
   series: { id: string; title: string; coverHue: number; coverUrl: string | null };
 };
 
-export const JOB_FILTERS = ['active', 'failed', 'ready', 'cancelled', 'all'] as const;
+export const JOB_FILTERS = ['active', 'failed', 'ready', 'published', 'cancelled', 'all'] as const;
 export type JobFilter = (typeof JOB_FILTERS)[number];
 const filterWhere: Record<JobFilter, SQL | undefined> = {
   active: inArray(translationJobs.status, ['queued', 'running']),
   failed: eq(translationJobs.status, 'failed'),
-  ready: eq(translationJobs.status, 'ready'),
+  ready: and(eq(translationJobs.status, 'ready'), eq(translationJobs.stage, 'ready')),
+  published: and(eq(translationJobs.status, 'ready'), eq(translationJobs.stage, 'published')),
   cancelled: eq(translationJobs.status, 'cancelled'),
   all: undefined,
 };
@@ -64,11 +66,14 @@ export async function listJobs(input: Pagination & { filter?: JobFilter } = {}):
       .limit(q.limit).offset(q.offset),
     db().select({ total: count() }).from(translationJobs).where(where),
   ]);
+  const logRows = rows.length ? await db().select({ jobId: translationJobLogs.jobId, stage: translationJobLogs.stage, level: translationJobLogs.level, message: translationJobLogs.message, createdAt: translationJobLogs.createdAt })
+    .from(translationJobLogs).where(inArray(translationJobLogs.jobId, rows.map(row => row.id))).orderBy(desc(translationJobLogs.createdAt)).limit(500) : [];
   return {
     items: rows.map(r => ({
       id: r.id, status: r.status, stage: r.stage, stageProgress: r.stageProgress, attempt: r.attempt, priority: r.priority,
       errorCode: r.errorCode, errorMessage: r.errorMessage, sourceLanguage: r.sourceLanguage, targetLanguage: r.targetLanguage,
       createdAt: r.createdAt, startedAt: r.startedAt, finishedAt: r.finishedAt,
+      logs: logRows.filter(logRow => logRow.jobId === r.id).slice(0, 6).reverse(),
       chapter: { id: r.chapterId, number: r.chapterNumber, status: r.chapterStatus, pageCount: r.pageCount },
       series: { id: r.seriesId, title: r.seriesTitle, coverHue: r.coverHue, coverUrl: imageSrc(r.coverKey) },
     })),
@@ -78,18 +83,25 @@ export async function listJobs(input: Pagination & { filter?: JobFilter } = {}):
 
 export async function jobCounts() {
   await requireRole('editor');
-  const rows = await db().select({ status: translationJobs.status, n: count() }).from(translationJobs).groupBy(translationJobs.status);
-  const by = Object.fromEntries(rows.map(r => [r.status, r.n])) as Partial<Record<JobStatus, number>>;
-  return { queued: by.queued ?? 0, running: by.running ?? 0, failed: by.failed ?? 0, ready: by.ready ?? 0, cancelled: by.cancelled ?? 0 };
+  const rows = await db().select({ status: translationJobs.status, stage: translationJobs.stage, n: count() }).from(translationJobs).groupBy(translationJobs.status, translationJobs.stage);
+  const countStatus = (status: JobStatus) => rows.filter(row => row.status === status).reduce((sum, row) => sum + row.n, 0);
+  return {
+    queued: countStatus('queued'), running: countStatus('running'), failed: countStatus('failed'), cancelled: countStatus('cancelled'),
+    ready: rows.filter(row => row.status === 'ready' && row.stage === 'ready').reduce((sum, row) => sum + row.n, 0),
+    published: rows.filter(row => row.status === 'ready' && row.stage === 'published').reduce((sum, row) => sum + row.n, 0),
+  };
 }
 
-/** Put a failed or cancelled job back in the queue as a new attempt, resuming from the stage it stopped at. */
+/** Retry a failed or cancelled job as a fresh, idempotent attempt. */
 export async function retryJob(jobId: string) {
   const actor = await requireRole('editor');
   const id = parseInput(uuid, jobId);
   return db().transaction(async tx => {
+    const [lastFailure] = await tx.select({ details: translationJobLogs.details }).from(translationJobLogs)
+      .where(and(eq(translationJobLogs.jobId, id), eq(translationJobLogs.stage, 'failed'))).orderBy(desc(translationJobLogs.createdAt)).limit(1);
+    const failedAtStage = typeof lastFailure?.details.failedAtStage === 'string' ? lastFailure.details.failedAtStage : 'validating';
     const [job] = await tx.update(translationJobs).set({
-      status: 'queued', attempt: sql`${translationJobs.attempt} + 1`, stageProgress: 0, errorCode: null, errorMessage: null, startedAt: null, finishedAt: null,
+      status: 'queued', stage: 'queued', attempt: sql`${translationJobs.attempt} + 1`, stageProgress: 0, errorCode: null, errorMessage: null, startedAt: null, finishedAt: null,
     }).where(and(eq(translationJobs.id, id), inArray(translationJobs.status, ['failed', 'cancelled'])))
       .returning({ chapterId: translationJobs.chapterId, attempt: translationJobs.attempt, stage: translationJobs.stage });
     if (!job) throw new DalError('CONFLICT', 'Only failed or cancelled jobs can be retried.');
@@ -97,6 +109,7 @@ export async function retryJob(jobId: string) {
       .where(and(eq(translationJobs.chapterId, job.chapterId), inArray(translationJobs.status, ['queued', 'running']), sql`${translationJobs.id} <> ${id}`));
     if (busy) throw new DalError('CONFLICT', 'This chapter already has another job in progress.');
     await tx.update(chapters).set({ status: 'processing' }).where(and(eq(chapters.id, job.chapterId), sql`${chapters.status} <> 'published'`));
+    await tx.insert(translationJobLogs).values({ jobId: id, attempt: job.attempt, stage: 'queued', message: 'Retry queued as a fresh, idempotent attempt.', details: { retryFrom: failedAtStage } });
     await recordAudit(tx, actor, { action: 'translation_job.retry', targetType: 'translation_job', targetId: id, metadata: { attempt: job.attempt, stage: job.stage } });
     return { id };
   });
@@ -133,6 +146,7 @@ export async function queueChapter(chapterId: string, targetLanguage = 'mn') {
     const [job] = await tx.insert(translationJobs).values({ chapterId: id, sourceLanguage: ch.sourceLanguage, targetLanguage: target, requestedBy: actor.userId }).returning({ id: translationJobs.id });
     await tx.update(chapters).set({ status: 'processing' }).where(eq(chapters.id, id));
     await recordAudit(tx, actor, { action: 'translation_job.create', targetType: 'translation_job', targetId: job.id, metadata: { chapterId: id } });
+    await tx.insert(translationJobLogs).values({ jobId: job.id, attempt: 1, stage: 'queued', message: 'Chapter queued for image processing and translation.' });
     return job;
   });
 }
@@ -238,15 +252,24 @@ export async function reviewSegment(input: ReviewSegmentInput) {
   const actor = await requireRole('translator');
   const data = parseInput(reviewSegmentInput, input);
   if (data.reviewStatus === 'edited' && !data.translatedText) throw new DalError('INVALID_INPUT', 'Edited segments need text.', { translatedText: ['Required'] });
+  if (data.reviewStatus === 'edited' && /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/u.test(data.translatedText ?? '')) throw new DalError('INVALID_INPUT', 'Corrected text must not contain untranslated Korean.', { translatedText: ['Translate all Korean text'] });
+  const [current] = await db().select({ qaFlags: translationSegments.qaFlags }).from(translationSegments).where(and(
+    eq(translationSegments.id, data.segmentId),
+    sql`exists (select 1 from ${translationJobs} j join ${chapters} c on c.id = j.chapter_id where j.id = ${translationSegments.jobId} and j.status = 'ready' and c.status = 'in_review')`,
+  ));
+  const correctedFlags = data.reviewStatus === 'edited'
+    ? (current?.qaFlags ?? []).filter(flag => ['overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'cleanup_failed', 'cleanup_unavailable', 'delivery_storage_failed'].includes(flag))
+    : undefined;
   const [row] = await db().update(translationSegments)
-    .set({ reviewStatus: data.reviewStatus, ...(data.translatedText !== undefined ? { translatedText: data.translatedText } : {}), reviewedBy: actor.userId, reviewedAt: new Date() })
+    .set({ reviewStatus: data.reviewStatus, ...(correctedFlags ? { qaFlags: correctedFlags, warning: correctedFlags.join(', ') || null } : {}), ...(data.translatedText !== undefined ? { translatedText: data.translatedText } : {}), reviewedBy: actor.userId, reviewedAt: new Date() })
     .where(and(
       eq(translationSegments.id, data.segmentId),
       sql`exists (select 1 from ${translationJobs} j join ${chapters} c on c.id = j.chapter_id where j.id = ${translationSegments.jobId} and j.status = 'ready' and c.status = 'in_review')`,
     ))
-    .returning({ id: translationSegments.id, reviewStatus: translationSegments.reviewStatus });
+    .returning({ id: translationSegments.id, jobId: translationSegments.jobId, pageId: translationSegments.pageId, reviewStatus: translationSegments.reviewStatus });
   if (!row) throw new DalError('CONFLICT', 'This segment is no longer under review.');
-  return row;
+  const visualFlags = data.reviewStatus === 'edited' ? await rerenderReviewedPage(row.jobId, row.pageId) : [];
+  return { ...row, visualFlags };
 }
 
 /** Approve every still-pending segment on one page. */
@@ -271,10 +294,13 @@ export async function sendBack(jobId: string, note: string) {
   const id = parseInput(uuid, jobId);
   const reason = parseInput(z.string().trim().max(500), note);
   return db().transaction(async tx => {
-    const [job] = await tx.update(translationJobs).set({ status: 'queued', stage: 'translating', stageProgress: 0, attempt: sql`${translationJobs.attempt} + 1`, finishedAt: null, startedAt: null })
-      .where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'ready'))).returning({ chapterId: translationJobs.chapterId });
+    const [job] = await tx.update(translationJobs).set({ status: 'queued', stage: 'queued', stageProgress: 0, attempt: sql`${translationJobs.attempt} + 1`, finishedAt: null, startedAt: null })
+      .where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'ready'), eq(translationJobs.stage, 'ready'),
+        sql`exists (select 1 from ${chapters} c where c.id = ${translationJobs.chapterId} and c.status = 'in_review')`)).returning({ chapterId: translationJobs.chapterId });
     if (!job) throw new DalError('CONFLICT', 'Only chapters waiting for review can be sent back.');
     await tx.update(chapters).set({ status: 'processing' }).where(and(eq(chapters.id, job.chapterId), eq(chapters.status, 'in_review')));
+    const [updatedJob] = await tx.select({ attempt: translationJobs.attempt }).from(translationJobs).where(eq(translationJobs.id, id));
+    await tx.insert(translationJobLogs).values({ jobId: id, attempt: updatedJob.attempt, stage: 'queued', message: 'Admin returned chapter to the processing pipeline.', details: { note: reason || null } });
     await recordAudit(tx, actor, { action: 'review.send_back', targetType: 'translation_job', targetId: id, metadata: { chapterId: job.chapterId, note: reason || null } });
     return { chapterId: job.chapterId };
   });
@@ -285,23 +311,26 @@ export async function publishReviewed(jobId: string) {
   const actor = await requireRole('editor');
   const id = parseInput(uuid, jobId);
   return db().transaction(async tx => {
-    const [job] = await tx.select({ chapterId: translationJobs.chapterId }).from(translationJobs).where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'ready'))).for('update');
+    const [job] = await tx.select({ chapterId: translationJobs.chapterId }).from(translationJobs).where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'ready'), eq(translationJobs.stage, 'ready'))).for('update');
     if (!job) throw new DalError('NOT_FOUND', 'Review not found.');
     const [{ open }] = await tx.select({ open: count() }).from(translationSegments)
       .where(and(eq(translationSegments.jobId, id), inArray(translationSegments.reviewStatus, ['pending', 'flagged'])));
     if (open > 0) throw new DalError('CONFLICT', `${open} region${open === 1 ? '' : 's'} still need approval.`);
     const [pageCheck] = await tx.select({ total: count(), missing: sql<number>`count(*) filter (where ${chapterPages.outputKey} is null)::int`, critical: sql<number>`count(*) filter (where ${chapterPages.visualQaFlags} ?| array['cleanup_failed','cleanup_unavailable','missing_translation','overflow','clipping','outside_region','overlapping_text','unreadably_small_text','delivery_storage_failed'])::int` })
       .from(chapterPages).where(eq(chapterPages.chapterId, job.chapterId));
+    const [chapter] = await tx.select({ pageCount: chapters.pageCount }).from(chapters).where(eq(chapters.id, job.chapterId));
     const [segmentBlockers] = await tx.select({ count: count() }).from(translationSegments).where(and(
       eq(translationSegments.jobId, id),
-      sql`${translationSegments.qaFlags} ?| array['empty_translation','untranslated_text','malformed_output']`,
+      sql`exists (select 1 from jsonb_array_elements_text(${translationSegments.qaFlags}) as qa(flag) where qa.flag in ('empty_translation','untranslated_text','malformed_output','ocr_critical_failure') or qa.flag like 'glossary_violation:%' or qa.flag like 'character_name_inconsistent:%')`,
     ));
-    if (pageCheck.missing || pageCheck.critical || segmentBlockers.count) throw new DalError('CONFLICT', 'Critical visual QA failures remain. Re-run the chapter with image cleanup configured and resolve all flagged text before publishing.');
+    if (!chapter || pageCheck.total !== chapter.pageCount || pageCheck.missing || pageCheck.critical || segmentBlockers.count) throw new DalError('CONFLICT', 'Critical QA failures remain: check that every required page has a delivery image and resolve visual or translation flags before publishing.');
     const [ch] = await tx.update(chapters).set({ status: 'published', publishedAt: new Date() })
       .where(and(eq(chapters.id, job.chapterId), eq(chapters.status, 'in_review')))
       .returning({ id: chapters.id, seriesId: chapters.seriesId, number: chapters.number });
     if (!ch) throw new DalError('CONFLICT', 'This chapter isn’t waiting for review.');
     await tx.update(translationJobs).set({ stage: 'published', stageProgress: 100 }).where(eq(translationJobs.id, id));
+    const [publishedJob] = await tx.select({ attempt: translationJobs.attempt }).from(translationJobs).where(eq(translationJobs.id, id));
+    await tx.insert(translationJobLogs).values({ jobId: id, attempt: publishedJob.attempt, stage: 'published', message: 'Chapter published manually after review and QA checks passed.' });
     const href = await notifyFollowers(tx, ch);
     await recordAudit(tx, actor, { action: 'review.publish', targetType: 'chapter', targetId: ch.id, metadata: { jobId: id, number: ch.number } });
     return { chapterId: ch.id, href };

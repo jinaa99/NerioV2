@@ -27,7 +27,7 @@ export async function putImage(key: string, body: Buffer): Promise<void> {
 }
 
 export async function putDeliveryImage(key: string, body: Buffer): Promise<void> {
-  if (!/^chapters\/[a-z0-9-]+\/delivery-[0-9]{1,4}-[0-9]{1,4}\.png$/.test(key)) throw new Error('Invalid delivery image key');
+  if (!/^chapters\/[a-z0-9-]+\/delivery-[0-9]{1,4}-[0-9]{1,4}(?:-[0-9]{4})?\.png$/.test(key)) throw new Error('Invalid delivery image key');
   const root = path.resolve(serverEnv().NERIO_STORAGE_DIR);
   const destination = path.resolve(root, key);
   if (!destination.startsWith(`${root}${path.sep}`)) throw new Error('Invalid delivery image key');
@@ -46,5 +46,5 @@ export async function getImage(key: string): Promise<Buffer | null> {
 }
 
 export function isChapterImageKey(key: string): boolean {
-  return /^chapters\/[a-z0-9-]+\/(?:[0-9]{1,4}|delivery-[0-9]{1,4}-[0-9]{1,4})\.png$/.test(key);
+  return /^chapters\/[a-z0-9-]+\/(?:[0-9]{1,4}|delivery-[0-9]{1,4}-[0-9]{1,4}(?:-[0-9]{4})?)\.png$/.test(key);
 }

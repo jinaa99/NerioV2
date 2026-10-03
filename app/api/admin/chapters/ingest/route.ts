@@ -2,7 +2,7 @@ import { and, eq, isNull, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { requireRole } from '@/server/auth/actor';
 import { db } from '@/server/db/client';
-import { chapterPages, chapters, series, translationJobs } from '@/server/db/schema';
+import { chapterPages, chapters, series, translationJobLogs, translationJobs } from '@/server/db/schema';
 import { IngestionError, inspectChapterZip } from '@/server/chapter-ingestion';
 import { putImage, deleteImage } from '@/server/storage';
 import { serverEnv } from '@/server/env';
@@ -73,7 +73,12 @@ export async function POST(request: Request) {
     const result = await db().transaction(async tx => {
       const [chapter] = await tx.insert(chapters).values({ seriesId, number, title, status: 'processing', pageCount: pages.length, createdBy: actor.userId }).returning({ id: chapters.id, number: chapters.number });
       await tx.insert(chapterPages).values(pages.map((page, i) => ({ chapterId: chapter.id, pageNumber: i + 1, sourceKey: keys[i], originalFilename: page.filename.slice(-512), contentHash: page.hash, width: page.width, height: page.height, bytes: page.bytes.length })));
-      const [job] = await tx.insert(translationJobs).values({ chapterId: chapter.id, sourceLanguage: seriesRow.sourceLanguage, requestedBy: actor.userId, options: { ingestion: true, operationKey } }).returning({ id: translationJobs.id });
+      const [job] = await tx.insert(translationJobs).values({ chapterId: chapter.id, sourceLanguage: seriesRow.sourceLanguage, requestedBy: actor.userId, options: { ingestion: true, operationKey }, stage: 'queued' }).returning({ id: translationJobs.id });
+      await tx.insert(translationJobLogs).values([
+        { jobId: job.id, attempt: 1, stage: 'validating', message: 'ZIP structure and upload limits validated.' },
+        { jobId: job.id, attempt: 1, stage: 'processing_images', message: `Extracted, decoded and normalized ${pages.length} page images.` },
+        { jobId: job.id, attempt: 1, stage: 'queued', message: `Saved ${pages.length} master pages; queued OCR and translation.` },
+      ]);
       await recordAudit(tx, actor, { action: 'chapter.upload', targetType: 'chapter', targetId: chapter.id, metadata: { seriesId, number: chapter.number, pages: pages.length, mode: 'zip', jobId: job.id } });
       return { chapterId: chapter.id, jobId: job.id, pageCount: pages.length };
     });

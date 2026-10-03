@@ -78,6 +78,13 @@
       "when": 1791292800000,
       "tag": "0010_visual_typesetting",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1791379200000,
+      "tag": "0011_pipeline_state_logs",
+      "breakpoints": true
     }
   ]
 }

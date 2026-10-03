@@ -11,7 +11,7 @@ import { getCurrentActor, hasRole, requireRole, type Actor } from '../auth/actor
 import { db, type Executor } from '../db/client';
 import { outer } from '../db/sql';
 import {
-  chapterPages, chapters, follows, genres, notifications, profiles, readingProgress, series, seriesGenres, seriesTags, tags, translationJobs,
+  chapterPages, chapters, follows, genres, notifications, profiles, readingProgress, series, seriesGenres, seriesTags, tags, translationJobLogs, translationJobs,
 } from '../db/schema';
 import { DalError, parseInput, rethrowUnique } from '../errors';
 import { imageSrc } from '../storage';
@@ -741,6 +741,7 @@ export async function uploadChapter(input: UploadChapterInput) {
           chapterId: ch.id, sourceLanguage: data.sourceLanguage ?? s.sourceLanguage, targetLanguage: data.targetLanguage, requestedBy: actor.userId,
         }).returning({ id: translationJobs.id });
         jobId = job.id;
+        await tx.insert(translationJobLogs).values({ jobId: job.id, attempt: 1, stage: 'queued', message: `Validated upload records for ${data.pages.length} pages; queued full processing.` });
       }
       await recordAudit(tx, actor, { action: 'chapter.upload', targetType: 'chapter', targetId: ch.id, metadata: { seriesId: s.id, number: ch.number, pages: data.pages.length, mode: data.mode, jobId } });
       return { chapterId: ch.id, jobId };

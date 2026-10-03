@@ -49,6 +49,9 @@ export default function Review({ job }: { job: ReviewJobDTO }) {
       setBusy(null);
       if (!res.ok) return toast(res.error, 'error', 'var(--danger)');
       setSegments(list => list.map(s => (s.id === seg.id ? { ...s, reviewStatus, translatedText: translatedText ?? s.translatedText } : s)));
+      if (reviewStatus === 'edited') router.refresh();
+      if (res.data?.visualFlags?.length) toast(`Text saved, but page QA still flags: ${res.data.visualFlags.join(', ')}`, 'error', 'var(--danger)');
+      else if (reviewStatus === 'edited') toast('Text corrected and page re-rendered');
       setEditing(null);
       if (reviewStatus === 'flagged') toast(`Region ${seg.position} flagged for re-translation`, 'replay', 'var(--warning)');
       // Move to the next open region on this page.
