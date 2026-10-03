@@ -105,6 +105,8 @@ export const chapterPages = pgTable('chapter_pages', {
   sourceKey: text().notNull(),
   /** Object-storage key of the final typeset image (null until processed). */
   outputKey: text(),
+  originalFilename: varchar({ length: 512 }),
+  contentHash: varchar({ length: 64 }),
   width: integer().notNull(),
   height: integer().notNull(),
   bytes: integer(),

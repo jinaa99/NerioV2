@@ -11,7 +11,7 @@ export const chapterAccess = pgEnum('chapter_access', ['free', 'early_access']);
 export const notificationType = pgEnum('notification_type', ['new_chapter', 'payment_confirmed', 'payment_rejected', 'report_update', 'system']);
 
 /** Mirrors the admin pipeline in lib/admin-data.ts (STAGES). */
-export const pipelineStage = pgEnum('pipeline_stage', ['validating', 'ocr', 'translating', 'cleaning', 'typesetting', 'optimizing', 'qa', 'ready', 'published']);
+export const pipelineStage = pgEnum('pipeline_stage', ['validating', 'extracting', 'sorting', 'validating_images', 'optimizing_images', 'uploading', 'creating_records', 'ocr', 'translating', 'cleaning', 'typesetting', 'optimizing', 'qa', 'ready', 'published']);
 export const jobStatus = pgEnum('job_status', ['queued', 'running', 'failed', 'ready', 'cancelled']);
 export const segmentKind = pgEnum('segment_kind', ['speech', 'narration', 'sfx', 'sign', 'other']);
 export const segmentReview = pgEnum('segment_review', ['pending', 'approved', 'edited', 'flagged']);

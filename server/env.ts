@@ -15,6 +15,15 @@ const schema = z.object({
       : 'must be a postgres:// or postgresql:// URL',
   }),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  CHAPTER_ZIP_MAX_BYTES: z.coerce.number().int().min(1_048_576).max(1_073_741_824).default(250 * 1024 * 1024),
+  CHAPTER_IMAGE_MAX_BYTES: z.coerce.number().int().min(1_048_576).max(200 * 1024 * 1024).default(40 * 1024 * 1024),
+  CHAPTER_IMAGE_MIN_WIDTH: z.coerce.number().int().min(1).default(400),
+  CHAPTER_IMAGE_MIN_HEIGHT: z.coerce.number().int().min(1).default(500),
+  CHAPTER_IMAGE_MAX_WIDTH: z.coerce.number().int().max(50_000).default(12_000),
+  CHAPTER_IMAGE_MAX_HEIGHT: z.coerce.number().int().max(100_000).default(40_000),
+  CHAPTER_ARCHIVE_MAX_ENTRIES: z.coerce.number().int().min(1).max(2000).default(500),
+  CHAPTER_ARCHIVE_MAX_EXPANDED_BYTES: z.coerce.number().int().min(1_048_576).max(2_147_483_648).default(1_000_000_000),
+  NERIO_STORAGE_DIR: z.string().min(1).default('./private-storage'),
 });
 
 export type ServerEnv = z.infer<typeof schema>;

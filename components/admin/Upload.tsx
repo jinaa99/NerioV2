@@ -42,6 +42,7 @@ export default function Upload({ options, initialSeries }: { options: SeriesOpti
   const [phase, setPhase] = useState<'form' | 'checking' | 'saving' | 'done'>('form');
   const [checked, setChecked] = useState(0);
   const [result, setResult] = useState<Result | null>(null);
+  const [zip, setZip] = useState<File | null>(null);
   const [publishing, startPublish] = useTransition();
   const locked = phase !== 'form';
   const series = options.find(o => o.id === seriesId);
@@ -92,8 +93,32 @@ export default function Upload({ options, initialSeries }: { options: SeriesOpti
     toast(`Chapter ${chapterNo(result.number)} published`);
   });
 
+  const uploadZip = async () => {
+    setErr('');
+    if (!zip) return setErr('Choose a chapter ZIP file.');
+    setPhase('saving');
+    const body = new FormData();
+    body.set('file', zip);
+    body.set('seriesId', seriesId);
+    body.set('number', num);
+    body.set('title', title);
+    try {
+      const response = await fetch('/api/admin/chapters/ingest', { method: 'POST', body });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? 'Chapter upload failed.');
+      setResult({ chapterId: data.chapterId, jobId: data.jobId, series: series?.title ?? '', number: Number(num), pages: data.pageCount, mode: 'process' });
+      setPhase('done');
+      toast(`Chapter ${chapterNo(Number(num))} uploaded and queued`);
+      router.refresh();
+    } catch (error) {
+      setPhase('form');
+      setErr(error instanceof Error ? error.message : 'Chapter upload failed.');
+    }
+  };
+
   const reset = () => {
     setPhase('form'); setResult(null); setUrls(''); setTitle('');
+    setZip(null);
     setNum(String((result?.number ?? 0) + 1));
   };
 
@@ -147,6 +172,12 @@ export default function Upload({ options, initialSeries }: { options: SeriesOpti
           <textarea aria-label="Page image URLs" className="a-input mono" rows={6} disabled={locked} value={urls} onChange={e => setUrls(e.target.value)}
             placeholder={'https://cdn.example.com/ch12/001.webp\nhttps://cdn.example.com/ch12/002.webp'} style={{ height: 'auto', padding: '10px 12px', fontSize: 12, lineHeight: 1.6, resize: 'vertical' }} />
           <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>One https URL per line, in reading order · JPG, PNG or WEBP · up to 300 pages{list.length ? ` · ${list.length} added` : ''}</span>
+        </div>
+        <div className="dropzone" style={{ cursor: 'default', alignItems: 'stretch', textAlign: 'left', padding: 14, gap: 8 }}>
+          <span className="row" style={{ gap: 8, font: '600 14px var(--sans)' }}><Icon name="folder_zip" size={20} color="var(--ink-2)" />Chapter ZIP</span>
+          <input aria-label="Chapter ZIP file" className="a-input" type="file" accept=".zip,application/zip" disabled={locked} onChange={e => setZip(e.target.files?.[0] ?? null)} />
+          <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>JPG, PNG, WEBP or AVIF pages · ordered by numbered filenames · up to 250 MB</span>
+          <Button variant="secondary" h={40} fs={13} disabled={locked || !zip} loading={phase === 'saving'} onClick={uploadZip}>Validate, optimize and upload ZIP</Button>
         </div>
         {err && (
           <div role="alert" className="row" style={{ gap: 10, padding: 12, borderRadius: 10, background: 'rgba(229,103,92,.08)', border: '1px solid rgba(229,103,92,.25)', fontSize: 13, color: 'var(--danger-text)' }}>

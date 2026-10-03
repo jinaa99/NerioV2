@@ -1,4 +1,7 @@
 import 'server-only';
+import { mkdir, writeFile, unlink, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { serverEnv } from './env';
 
 /**
  * Resolve a stored image reference (`series.cover_key`, `chapter_pages.source_key`) to a URL the
@@ -9,5 +12,26 @@ import 'server-only';
 export function imageSrc(ref: string | null | undefined): string | null {
   if (!ref) return null;
   if (ref.startsWith('https://')) return ref;
+  if (/^chapters\/[a-z0-9-]+\/[0-9]{1,4}\.png$/.test(ref)) return `/api/media/${ref}`;
   return null;
+}
+
+/** Private local provider. Deployments can replace this implementation with S3/R2 behind this API. */
+export async function putImage(key: string, body: Buffer): Promise<void> {
+  if (!/^chapters\/[a-z0-9-]+\/[0-9]{1,4}\.png$/.test(key)) throw new Error('Invalid storage key');
+  const root = path.resolve(serverEnv().NERIO_STORAGE_DIR);
+  const destination = path.resolve(root, key);
+  if (!destination.startsWith(`${root}${path.sep}`)) throw new Error('Invalid storage key');
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeFile(destination, body, { flag: 'wx', mode: 0o600 });
+}
+
+export async function deleteImage(key: string): Promise<void> {
+  if (!/^chapters\/[a-z0-9-]+\/[0-9]{1,4}\.png$/.test(key)) return;
+  await unlink(path.resolve(serverEnv().NERIO_STORAGE_DIR, key)).catch(() => undefined);
+}
+
+export async function getImage(key: string): Promise<Buffer | null> {
+  if (!/^chapters\/[a-z0-9-]+\/[0-9]{1,4}\.png$/.test(key)) return null;
+  return readFile(path.resolve(serverEnv().NERIO_STORAGE_DIR, key)).catch(() => null);
 }

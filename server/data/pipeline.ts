@@ -16,7 +16,7 @@ import { imageSrc } from '../storage';
 import { recordAudit } from './audit';
 import { notifyFollowers } from './catalog';
 
-export const PIPELINE_STAGES = ['validating', 'ocr', 'translating', 'cleaning', 'typesetting', 'optimizing', 'qa', 'ready', 'published'] as const;
+export const PIPELINE_STAGES = ['validating', 'extracting', 'sorting', 'validating_images', 'optimizing_images', 'uploading', 'creating_records', 'ocr', 'translating', 'cleaning', 'typesetting', 'optimizing', 'qa', 'ready', 'published'] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 export type JobStatus = 'queued' | 'running' | 'failed' | 'ready' | 'cancelled';
 type Paged<T> = { items: T[]; total: number; limit: number; offset: number };
