@@ -54,6 +54,10 @@ export type ReaderChapterDTO = {
   pages: { id: string; pageNumber: number; width: number; height: number; src: string | null }[];
   /** Light list for the chapter drawer. */
   toc: { number: number; title: string | null; locked: boolean }[];
+  /** Where the signed-in reader left off in this chapter. */
+  resume: { pageNumber: number; pageOffset: number } | null;
+  /** First page images of the next chapter, preloaded near the end. Empty when locked or absent. */
+  nextPreload: string[];
 };
 
 /* Shared query pieces */
@@ -272,23 +276,34 @@ export async function getChapterForReader(seriesSlug: string, number: number): P
 
   const premium = await isPremium(actor);
   const locked = chapterLocked(row, premium, staff);
-  const [toc, pages] = await Promise.all([
-    db().select({ number: chapters.number, title: chapters.title, access: chapters.access, freeAt: chapters.freeAt })
+  const [toc, pages, progress] = await Promise.all([
+    db().select({ id: chapters.id, number: chapters.number, title: chapters.title, access: chapters.access, freeAt: chapters.freeAt })
       .from(chapters).where(and(eq(chapters.seriesId, row.seriesId), isPublishedChapter)).orderBy(desc(chapters.number)),
     locked ? Promise.resolve([]) : db()
       .select({ id: chapterPages.id, pageNumber: chapterPages.pageNumber, width: chapterPages.width, height: chapterPages.height, sourceKey: chapterPages.sourceKey, outputKey: chapterPages.outputKey })
       .from(chapterPages).where(eq(chapterPages.chapterId, row.id)).orderBy(asc(chapterPages.pageNumber)),
+    actor && !locked
+      ? db().select({ pageNumber: readingProgress.pageNumber, pageOffset: readingProgress.pageOffset }).from(readingProgress)
+        .where(and(eq(readingProgress.userId, actor.userId), eq(readingProgress.seriesId, row.seriesId), eq(readingProgress.chapterId, row.id)))
+      : Promise.resolve([]),
   ]);
   const prev = toc.find(c => c.number < row.number) ?? null;
   const next = [...toc].reverse().find(c => c.number > row.number) ?? null;
+  const nextLocked = !!next && chapterLocked(next, premium, staff);
+  const nextPages = next && !nextLocked
+    ? await db().select({ sourceKey: chapterPages.sourceKey, outputKey: chapterPages.outputKey }).from(chapterPages)
+      .where(eq(chapterPages.chapterId, next.id)).orderBy(asc(chapterPages.pageNumber)).limit(2)
+    : [];
   return {
     id: row.id, number: row.number, title: row.title, locked, freeAt: row.freeAt,
     series: { id: row.seriesId, slug: row.slug, title: row.seriesTitle, coverHue: row.coverHue },
     prev: prev?.number ?? null,
     next: next?.number ?? null,
-    nextLocked: !!next && chapterLocked(next, premium, staff),
+    nextLocked,
     pages: pages.map(p => ({ id: p.id, pageNumber: p.pageNumber, width: p.width, height: p.height, src: imageSrc(p.outputKey) ?? imageSrc(p.sourceKey) })),
     toc: toc.map(c => ({ number: c.number, title: c.title, locked: chapterLocked(c, premium, staff) })),
+    resume: progress[0] ?? null,
+    nextPreload: nextPages.flatMap(p => imageSrc(p.outputKey) ?? imageSrc(p.sourceKey) ?? []),
   };
 }
 

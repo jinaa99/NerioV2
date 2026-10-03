@@ -11,6 +11,8 @@ export const readingProgress = pgTable('reading_progress', {
   seriesId: uuid().notNull().references(() => series.id, { onDelete: 'cascade' }),
   chapterId: uuid().notNull().references(() => chapters.id, { onDelete: 'cascade' }),
   pageNumber: integer().notNull().default(1),
+  /** 0–1000: how far down `page_number` the reader was (per mille), for exact resume. */
+  pageOffset: smallint().notNull().default(0),
   /** 0–100, scroll progress within the chapter. */
   percent: smallint().notNull().default(0),
   updatedAt: tstz().notNull().defaultNow().$onUpdate(() => new Date()),
@@ -18,6 +20,7 @@ export const readingProgress = pgTable('reading_progress', {
   primaryKey({ columns: [t.userId, t.seriesId] }),
   index('reading_progress_user_recent_idx').on(t.userId, t.updatedAt.desc()),
   check('reading_progress_percent_range', sql`${t.percent} between 0 and 100`),
+  check('reading_progress_page_offset_range', sql`${t.pageOffset} between 0 and 1000`),
 ]);
 
 /** Chapters a user has opened. One row per (user, chapter); re-reads bump `last_read_at`. */

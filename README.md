@@ -15,7 +15,7 @@ npm run build
 | `/` | Home: hero carousel, continue reading, trending, updates, genres |
 | `/browse` | Catalog: search, genre/status filters, sort, pagination (`?q=&genre=&status=&sort=&page=`) |
 | `/series/[id]` | Series detail and chapter list (`id` is the series slug) |
-| `/read/[id]/[ch]` | Reader (shortcuts: ← → J K F S C H ? Esc) |
+| `/read/[id]/[ch]` | Reader (shortcuts: ← → J K Space F S C H ? Esc) |
 | `/profile?tab=…` | Overview, bookmarks, history, following, achievements, settings |
 | `/premium` | Bank-transfer Premium flow (info → pending → confirmed) |
 | `/login`, `/register` | Sign in and create an account (`?next=` returns you to the page you came from) |
@@ -42,6 +42,8 @@ Home, browse, search, series pages, the reader and the admin series/chapter scre
 - **Pages:** editors paste image URLs (one per line); the browser reads each image's size before saving. Pages can be reordered (drag or arrows, then *Save order*) and removed; page numbers are rewritten atomically.
 - **Publishing:** a chapter is visible when `status = 'published'` and `published_at <= now()`, so a future date schedules it. Followers are notified when a chapter first goes live (scheduled chapters notify at save time only if already due).
 - **Search:** title, author, artist, alternative titles and tag names, case-insensitive (`pg_trgm` indexes on title and author). `/api/search` serves the search overlay; `/api/series/[slug]/chapters` pages the chapter list.
+- **Reader:** pages render as boxes with each image's exact aspect ratio, so nothing shifts while images arrive. Only the page under the reader, one page above and a lookahead below are loaded (4 pages; 2 on 3G, 1 with Save-Data/2G). Images are the uploaded originals (no recompression). Near the end of a chapter the next chapter's route and first two images are prefetched. Failed images retry twice with backoff, then offer a manual retry; errored pages also retry when the browser comes back online.
+- **Reading progress:** saved per user and series (`reading_progress`: page, position within the page in ‰, percent) via `POST /api/progress`, debounced (2 s idle, at most every 15 s) and flushed with `sendBeacon` when the tab hides or closes. Reopening a chapter resumes at the saved position; signed-out readers resume from `localStorage`. Finished chapters reopen at the top.
 - **Series deletion** is a soft delete (`deleted_at`); chapter and page deletion are hard deletes.
 
 ## Backend

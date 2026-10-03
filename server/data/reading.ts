@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, lte, sql } from 'drizzle-orm';
 import { pagination, saveProgressInput, type Pagination, type SaveProgressInput } from '@/lib/validation';
 import { requireActor } from '../auth/actor';
 import { db } from '../db/client';
@@ -13,16 +13,16 @@ export async function saveProgress(input: SaveProgressInput) {
   const [ch] = await db()
     .select({ seriesId: chapters.seriesId })
     .from(chapters)
-    .where(and(eq(chapters.id, data.chapterId), eq(chapters.status, 'published')));
+    .where(and(eq(chapters.id, data.chapterId), eq(chapters.status, 'published'), lte(chapters.publishedAt, sql`now()`)));
   if (!ch) throw new DalError('NOT_FOUND', 'Chapter not found.');
 
   const now = new Date();
   await db().transaction(async tx => {
     await tx.insert(readingProgress)
-      .values({ userId: actor.userId, seriesId: ch.seriesId, chapterId: data.chapterId, pageNumber: data.pageNumber, percent: data.percent })
+      .values({ userId: actor.userId, seriesId: ch.seriesId, chapterId: data.chapterId, pageNumber: data.pageNumber, pageOffset: data.pageOffset, percent: data.percent })
       .onConflictDoUpdate({
         target: [readingProgress.userId, readingProgress.seriesId],
-        set: { chapterId: data.chapterId, pageNumber: data.pageNumber, percent: data.percent, updatedAt: now },
+        set: { chapterId: data.chapterId, pageNumber: data.pageNumber, pageOffset: data.pageOffset, percent: data.percent, updatedAt: now },
       });
     await tx.insert(readingHistory)
       .values({ userId: actor.userId, seriesId: ch.seriesId, chapterId: data.chapterId, completed: data.percent >= 95 })

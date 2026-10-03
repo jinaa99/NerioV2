@@ -184,6 +184,7 @@ export type ReorderPagesInput = z.input<typeof reorderPagesInput>;
 export const saveProgressInput = z.object({
   chapterId: uuid,
   pageNumber: z.number().int().min(1).max(10_000),
+  pageOffset: z.number().int().min(0).max(1000).default(0),
   percent: z.number().int().min(0).max(100),
 }).strict();
 export type SaveProgressInput = z.input<typeof saveProgressInput>;

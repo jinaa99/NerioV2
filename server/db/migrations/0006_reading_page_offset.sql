@@ -1,0 +1,2 @@
+ALTER TABLE "reading_progress" ADD COLUMN "page_offset" smallint DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "reading_progress" ADD CONSTRAINT "reading_progress_page_offset_range" CHECK ("reading_progress"."page_offset" between 0 and 1000);

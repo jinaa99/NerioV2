@@ -43,6 +43,13 @@
       "when": 1791025530083,
       "tag": "0005_drop_series_alt_title",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791044222640,
+      "tag": "0006_reading_page_offset",
+      "breakpoints": true
     }
   ]
 }
