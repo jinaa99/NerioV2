@@ -24,6 +24,14 @@ const schema = z.object({
   CHAPTER_ARCHIVE_MAX_ENTRIES: z.coerce.number().int().min(1).max(2000).default(500),
   CHAPTER_ARCHIVE_MAX_EXPANDED_BYTES: z.coerce.number().int().min(1_048_576).max(2_147_483_648).default(1_000_000_000),
   NERIO_STORAGE_DIR: z.string().min(1).default('./private-storage'),
+  OCR_PROVIDER: z.enum(['mock', 'openai_compatible']).default('mock'),
+  TRANSLATION_PROVIDER: z.enum(['mock', 'openai_compatible']).default('mock'),
+  AI_API_BASE_URL: z.url({ protocol: /^https$/ }).default('https://api.openai.com/v1'),
+  AI_API_KEY: z.string().optional(),
+  OCR_MODEL: z.string().min(1).default('gpt-4o-mini'),
+  TRANSLATION_MODEL: z.string().min(1).default('gpt-4o-mini'),
+  OCR_CONFIDENCE_MIN: z.coerce.number().min(0).max(1).default(0.65),
+  TRANSLATION_CONFIDENCE_MIN: z.coerce.number().min(0).max(1).default(0.65),
 });
 
 export type ServerEnv = z.infer<typeof schema>;

@@ -128,7 +128,7 @@ export default function Review({ job }: { job: ReviewJobDTO }) {
                   ? <img src={page.src} alt={`Page ${page.pageNumber}`} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }} />
                   : <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: 'var(--ink-4)' }}><Icon name="hide_image" /></div>}
                 {onPage.map(s => {
-                  const [c] = confColors(s.confidence ?? 0);
+                  const [c] = confColors(s.translationConfidence ?? s.confidence ?? 0);
                   const isSel = sel === s.id;
                   const text = editing === s.id ? draft : s.translatedText ?? '';
                   if (!pane.translated && !boxes) return null;
@@ -156,7 +156,7 @@ export default function Review({ job }: { job: ReviewJobDTO }) {
         <div className="stack" style={{ gap: 10 }}>
           {onPage.length === 0 && <div className="a-card" style={{ padding: 24, color: 'var(--ink-3)', fontSize: 13 }}>No text regions were detected on this page.</div>}
           {onPage.map(s => {
-            const [c, ct] = confColors(s.confidence ?? 0);
+            const [c, ct] = confColors(s.translationConfidence ?? s.confidence ?? 0);
             const isSel = sel === s.id, isEditing = editing === s.id;
             return (
               <div key={s.id} onClick={() => setSel(s.id)} className="stack" style={{ padding: 14, borderRadius: 14, background: 'var(--s1)', border: `1px solid ${isSel ? 'rgba(232,130,95,.5)' : 'var(--line-1)'}`, gap: 10, cursor: 'pointer', transition: 'border-color .2s', opacity: busy === s.id ? .6 : 1 }}>
@@ -172,6 +172,7 @@ export default function Review({ job }: { job: ReviewJobDTO }) {
                   <span className={`badge xs ${STATE_TONE[s.reviewStatus]}`} style={{ marginLeft: s.confidence === null ? 'auto' : undefined }}>{STATE_LABEL[s.reviewStatus]}</span>
                 </div>
                 {s.warning && <div className="row" style={{ gap: 8, padding: '8px 10px', borderRadius: 8, background: 'rgba(230,194,106,.08)', fontSize: 12, color: 'var(--warning-text)', alignItems: 'flex-start' }}><Icon name="warning" size={16} />{s.warning}</div>}
+                <span style={{ font: '400 10px var(--mono)', color: 'var(--ink-3)' }}>OCR {s.ocrConfidence?.toFixed(2) ?? '—'} · TRANSLATION {s.translationConfidence?.toFixed(2) ?? '—'} · {s.processingStatus.toUpperCase()}</span>
                 <div style={{ font: '500 14px/1.5 var(--kr)', color: 'var(--ink-2)' }}>{s.sourceText}</div>
                 {isEditing
                   ? <textarea aria-label={`Translation for region ${s.position}`} value={draft} onClick={e => e.stopPropagation()} autoFocus maxLength={2000}

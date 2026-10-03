@@ -17,7 +17,7 @@ export const translationJobs = pgTable('translation_jobs', {
   /** 0–100 progress within the current stage. */
   stageProgress: smallint().notNull().default(0),
   sourceLanguage: varchar({ length: 16 }).notNull(),
-  targetLanguage: varchar({ length: 16 }).notNull().default('en'),
+  targetLanguage: varchar({ length: 16 }).notNull().default('mn'),
   attempt: integer().notNull().default(1),
   /** Higher runs first. */
   priority: smallint().notNull().default(0),
@@ -52,6 +52,10 @@ export const translationSegments = pgTable('translation_segments', {
   h: real().notNull(),
   sourceText: text().notNull(),
   translatedText: text(),
+  processingStatus: varchar({ length: 24 }).notNull().default('pending'),
+  ocrConfidence: real(),
+  translationConfidence: real(),
+  qaFlags: jsonb().$type<string[]>().notNull().default([]),
   /** Model confidence 0–1; low values surface in admin review. */
   confidence: real(),
   warning: text(),
@@ -65,4 +69,6 @@ export const translationSegments = pgTable('translation_segments', {
   index('translation_segments_review_idx').on(t.jobId, t.reviewStatus),
   check('translation_segments_box', sql`${t.x} between 0 and 1 and ${t.y} between 0 and 1 and ${t.w} > 0 and ${t.w} <= 1 and ${t.h} > 0 and ${t.h} <= 1`),
   check('translation_segments_confidence_range', sql`${t.confidence} is null or ${t.confidence} between 0 and 1`),
+  check('translation_segments_ocr_confidence_range', sql`${t.ocrConfidence} is null or ${t.ocrConfidence} between 0 and 1`),
+  check('translation_segments_translation_confidence_range', sql`${t.translationConfidence} is null or ${t.translationConfidence} between 0 and 1`),
 ]);

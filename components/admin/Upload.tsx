@@ -14,7 +14,7 @@ type Measured = { url: string; width: number; height: number };
 type Result = { chapterId: string; jobId: string | null; series: string; number: number; pages: number; mode: 'process' | 'direct'; published?: boolean };
 
 const SOURCES: [string, string][] = [['ko', 'Korean'], ['ja', 'Japanese'], ['zh', 'Chinese']];
-const TARGETS: [string, string][] = [['en', 'English'], ['es', 'Spanish'], ['id', 'Indonesian']];
+const TARGETS: [string, string][] = [['mn', 'Mongolian'], ['en', 'English'], ['es', 'Spanish'], ['id', 'Indonesian']];
 
 /** Load each image in the browser to read its size; the server only stores what it's given. */
 function measure(url: string): Promise<Measured> {
@@ -35,7 +35,7 @@ export default function Upload({ options, initialSeries }: { options: SeriesOpti
   const [num, setNum] = useState(String(first?.nextNumber ?? 1));
   const [title, setTitle] = useState('');
   const [source, setSource] = useState(first?.sourceLanguage ?? 'ko');
-  const [target, setTarget] = useState('en');
+  const [target, setTarget] = useState('mn');
   const [mode, setMode] = useState<'process' | 'direct'>('process');
   const [urls, setUrls] = useState('');
   const [err, setErr] = useState('');

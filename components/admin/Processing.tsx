@@ -21,13 +21,23 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
   const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState<string | null>(null);
 
-  const act = (j: JobDTO, kind: 'retry' | 'cancel') => {
+  const act = (j: JobDTO, kind: 'run' | 'retry' | 'cancel') => {
     setBusy(j.id);
     startTransition(async () => {
-      const res = await (kind === 'retry' ? retryJobAction(j.id) : cancelJobAction(j.id));
+      let res: { ok: boolean; error?: string };
+      try {
+        if (kind === 'run') {
+          const response = await fetch(`/api/admin/pipeline/${j.id}/run`, { method: 'POST' });
+          const data = await response.json();
+          res = response.ok ? { ok: true } : { ok: false, error: data.error ?? 'Translation job failed.' };
+        } else res = await (kind === 'retry' ? retryJobAction(j.id) : cancelJobAction(j.id));
+      } catch {
+        setBusy(null);
+        return toast('Could not reach the processing service. Try again.', 'error', 'var(--danger)');
+      }
       setBusy(null);
-      if (!res.ok) return toast(res.error, 'error', 'var(--danger)');
-      toast(kind === 'retry' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} queued again` : 'Job cancelled', kind === 'retry' ? 'refresh' : 'block', 'var(--info)');
+      if (!res.ok) return toast(res.error ?? 'Pipeline action failed.', 'error', 'var(--danger)');
+      toast(kind === 'run' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} processed` : kind === 'retry' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} queued again` : 'Job cancelled', kind === 'cancel' ? 'block' : 'refresh', 'var(--info)');
       router.refresh();
     });
   };
@@ -46,7 +56,7 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
       </div>
       <div className="row" style={{ gap: 10, padding: '10px 14px', borderRadius: 12, border: '1px solid var(--line-1)', fontSize: 13, color: 'var(--ink-3)' }}>
         <Icon name="info" size={18} />
-        {paused ? 'The pipeline is paused in Settings. Queued jobs wait until it is resumed.' : 'Queued jobs are picked up by processing workers. Automated OCR and translation workers aren’t connected yet, so jobs stay queued until they are.'}
+        {paused ? 'The pipeline is paused in Settings. Queued jobs wait until it is resumed.' : 'Run a queued job to detect Korean text, build context, translate into Mongolian and check QA flags.'}
       </div>
       <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
         <div style={{ overflowX: 'auto' }}>
@@ -80,6 +90,7 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
                 </div>
                 <span className={`badge xs ${JOB_TONE[j.status]}`} style={{ padding: '4px 8px', borderRadius: 6 }}>{label}</span>
                 {(isFailed || j.status === 'cancelled') && <Button variant="secondary" h={32} px={12} icon="refresh" loading={busy === j.id} onClick={() => act(j, 'retry')}>Retry</Button>}
+                {j.status === 'queued' && <Button variant="primary" h={32} px={12} icon="play_arrow" disabled={paused} loading={busy === j.id} onClick={() => act(j, 'run')}>Run translation</Button>}
                 {(j.status === 'running' || j.status === 'queued') && <Button variant="ghost" h={32} loading={busy === j.id} onClick={() => { if (confirm('Cancel this job? The chapter returns to draft.')) act(j, 'cancel'); }}>Cancel</Button>}
                 {j.status === 'ready' && j.chapter.status === 'in_review' && <Link href={`/admin/review/${j.id}`} className="btn btn-secondary" style={{ '--h': '32px', '--px': '12px', '--fs': '13px' } as React.CSSProperties}>Review</Link>}
               </div>

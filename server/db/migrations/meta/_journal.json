@@ -64,6 +64,13 @@
       "when": 1791120000000,
       "tag": "0008_chapter_ingestion",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1791206400000,
+      "tag": "0009_ai_translation_pipeline",
+      "breakpoints": true
     }
   ]
 }

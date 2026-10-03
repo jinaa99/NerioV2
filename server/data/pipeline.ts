@@ -15,8 +15,9 @@ import { DalError, parseInput } from '../errors';
 import { imageSrc } from '../storage';
 import { recordAudit } from './audit';
 import { notifyFollowers } from './catalog';
+import { runTranslationJob } from '../ai/runner';
 
-export const PIPELINE_STAGES = ['validating', 'extracting', 'sorting', 'validating_images', 'optimizing_images', 'uploading', 'creating_records', 'ocr', 'translating', 'cleaning', 'typesetting', 'optimizing', 'qa', 'ready', 'published'] as const;
+export const PIPELINE_STAGES = ['validating', 'extracting', 'sorting', 'validating_images', 'optimizing_images', 'uploading', 'creating_records', 'ocr', 'context_building', 'translating', 'cleaning', 'typesetting', 'optimizing', 'qa', 'ready', 'published'] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 export type JobStatus = 'queued' | 'running' | 'failed' | 'ready' | 'cancelled';
 type Paged<T> = { items: T[]; total: number; limit: number; offset: number };
@@ -117,7 +118,7 @@ export async function cancelJob(jobId: string) {
 }
 
 /** Queue processing for an existing chapter that has pages. */
-export async function queueChapter(chapterId: string, targetLanguage = 'en') {
+export async function queueChapter(chapterId: string, targetLanguage = 'mn') {
   const actor = await requireRole('editor');
   const id = parseInput(uuid, chapterId);
   const target = parseInput(z.string().regex(/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$/), targetLanguage);
@@ -134,6 +135,9 @@ export async function queueChapter(chapterId: string, targetLanguage = 'en') {
     return job;
   });
 }
+
+/** Run one queued OCR → context → translation → QA job. */
+export { runTranslationJob };
 
 /* Review queue */
 
@@ -183,7 +187,8 @@ export async function listReviewQueue(input: Pagination = {}): Promise<Paged<Rev
 export type ReviewSegmentDTO = {
   id: string; pageId: string; pageNumber: number; position: number; kind: string;
   x: number; y: number; w: number; h: number;
-  sourceText: string; translatedText: string | null; confidence: number | null; warning: string | null;
+  sourceText: string; translatedText: string | null; confidence: number | null; ocrConfidence: number | null; translationConfidence: number | null;
+  processingStatus: string; qaFlags: string[]; warning: string | null;
   reviewStatus: 'pending' | 'approved' | 'edited' | 'flagged';
 };
 export type ReviewJobDTO = {
@@ -211,7 +216,9 @@ export async function getReviewJob(jobId: string): Promise<ReviewJobDTO | null> 
       id: translationSegments.id, pageId: translationSegments.pageId, pageNumber: chapterPages.pageNumber, position: translationSegments.position, kind: translationSegments.kind,
       x: translationSegments.x, y: translationSegments.y, w: translationSegments.w, h: translationSegments.h,
       sourceText: translationSegments.sourceText, translatedText: translationSegments.translatedText,
-      confidence: translationSegments.confidence, warning: translationSegments.warning, reviewStatus: translationSegments.reviewStatus,
+      confidence: translationSegments.confidence, ocrConfidence: translationSegments.ocrConfidence,
+      translationConfidence: translationSegments.translationConfidence, processingStatus: translationSegments.processingStatus,
+      qaFlags: translationSegments.qaFlags, warning: translationSegments.warning, reviewStatus: translationSegments.reviewStatus,
     }).from(translationSegments).innerJoin(chapterPages, eq(chapterPages.id, translationSegments.pageId))
       .where(eq(translationSegments.jobId, job.jobId)).orderBy(asc(chapterPages.pageNumber), asc(translationSegments.position)),
   ]);
