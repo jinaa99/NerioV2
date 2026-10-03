@@ -60,7 +60,7 @@ export default function Settings({ settings }: { settings: SettingsDTO }) {
         </label>
         <label className="field" style={{ gap: 6 }}><span className="label">Default typesetting font</span>
           <select className="a-input" value={pipeline.typesetFont} disabled={saving} onChange={e => { const v = e.target.value as SettingsDTO['typesetFont']; setPipeline(p => ({ ...p, typesetFont: v })); save({ typesetFont: v }, 'Font saved'); }}>
-            <option value="comic-neue">Comic Neue · dialogue</option><option value="anime-ace">Anime Ace · dialogue</option>
+            <option value="shonen">Shonen Namikus · comic dialogue</option><option value="noto-sans">Noto Sans · neutral dialogue</option>
           </select>
         </label>
         {TOGGLES.map(([key, label, desc]) => (

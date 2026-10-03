@@ -14,6 +14,7 @@ import { chapterPages, chapters, series, translationJobLogs, translationJobs, tr
 import { DalError, parseInput } from '../errors';
 import { imageSrc } from '../storage';
 import { recordAudit } from './audit';
+import { retryAttempt } from '@/server/ai/retry';
 import { notifyFollowers } from './catalog';
 import { rerenderReviewedPage, runTranslationJob } from '../ai/runner';
 
@@ -97,14 +98,18 @@ export async function retryJob(jobId: string) {
   const actor = await requireRole('editor');
   const id = parseInput(uuid, jobId);
   return db().transaction(async tx => {
+    const [current] = await tx.select({ status: translationJobs.status, attempt: translationJobs.attempt })
+      .from(translationJobs).where(eq(translationJobs.id, id)).for('update');
+    const nextAttempt = current && retryAttempt(current.status, current.attempt);
+    if (!current || nextAttempt === null) throw new DalError('CONFLICT', 'Only failed or cancelled jobs can be retried.');
     const [lastFailure] = await tx.select({ details: translationJobLogs.details }).from(translationJobLogs)
       .where(and(eq(translationJobLogs.jobId, id), eq(translationJobLogs.stage, 'failed'))).orderBy(desc(translationJobLogs.createdAt)).limit(1);
     const failedAtStage = typeof lastFailure?.details.failedAtStage === 'string' ? lastFailure.details.failedAtStage : 'validating';
     const [job] = await tx.update(translationJobs).set({
-      status: 'queued', stage: 'queued', attempt: sql`${translationJobs.attempt} + 1`, stageProgress: 0, errorCode: null, errorMessage: null, startedAt: null, finishedAt: null,
-    }).where(and(eq(translationJobs.id, id), inArray(translationJobs.status, ['failed', 'cancelled'])))
+      status: 'queued', stage: 'queued', attempt: nextAttempt, stageProgress: 0, errorCode: null, errorMessage: null, startedAt: null, finishedAt: null,
+    }).where(and(eq(translationJobs.id, id), eq(translationJobs.status, current.status)))
       .returning({ chapterId: translationJobs.chapterId, attempt: translationJobs.attempt, stage: translationJobs.stage });
-    if (!job) throw new DalError('CONFLICT', 'Only failed or cancelled jobs can be retried.');
+    if (!job) throw new DalError('CONFLICT', 'Job changed before the retry could be queued.');
     const [busy] = await tx.select({ id: translationJobs.id }).from(translationJobs)
       .where(and(eq(translationJobs.chapterId, job.chapterId), inArray(translationJobs.status, ['queued', 'running']), sql`${translationJobs.id} <> ${id}`));
     if (busy) throw new DalError('CONFLICT', 'This chapter already has another job in progress.');

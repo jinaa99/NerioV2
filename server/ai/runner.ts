@@ -12,8 +12,10 @@ import { DalError } from '@/server/errors';
 import { requireRole } from '@/server/auth/actor';
 import { recordAudit } from '@/server/data/audit';
 import { notifyFollowers } from '@/server/data/catalog';
+import { getSettings } from '@/server/data/settings';
 import { getImageCleanupProvider, getOCRProvider, getTranslationProvider, MalformedAIOutputError, type OCRRegion, type TranslationContext } from './providers';
 import { renderMongolianText } from './typesetting';
+import { checkPublication } from './qa';
 
 function isPrivateAddress(address: string) {
   if (isIP(address) === 4) {
@@ -211,9 +213,10 @@ export async function runTranslationJob(jobId: string) {
       processed++;
     }
     await log(job.id, claimed.attempt, 'translating', `Processed ${processed} text regions.`);
+    const settings = await getSettings();
     const cleanupProvider = getImageCleanupProvider();
     const pageQA: { id: string; flags: string[]; outputKey: string | null; outputBytes: number | null }[] = [];
-    const criticalVisualFlags = new Set(['cleanup_failed', 'cleanup_unavailable', 'missing_translation', 'overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'delivery_storage_failed']);
+    const criticalVisualFlags = new Set(['cleanup_failed', 'cleanup_unavailable', 'missing_translation', 'missing_glyph', 'overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'delivery_storage_failed']);
     for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
       const page = pages[pageIndex];
       const pageSegments = all.filter(segment => segment.pageId === page.id);
@@ -237,7 +240,7 @@ export async function runTranslationJob(jobId: string) {
       }
       activeStage = 'typesetting';
       await setStage(job.id, claimed.attempt, 'typesetting', Math.floor((pageIndex / pages.length) * 100));
-      const typeset = await renderMongolianText(cleanedImage, boxes, inpainted);
+      const typeset = await renderMongolianText(cleanedImage, boxes, inpainted, settings.typesetFont);
       for (const visualFlag of typeset.pageFlags) pageFlags.add(visualFlag);
       for (const [segmentId, segmentFlags] of typeset.flags) if (segmentFlags.length) {
         const segment = pageSegments.find(item => item.id === segmentId);
@@ -263,11 +266,14 @@ export async function runTranslationJob(jobId: string) {
     }
     activeStage = 'qa';
     await setStage(job.id, claimed.attempt, 'qa', 0);
-    const blockerFlags = new Set(['cleanup_failed', 'cleanup_unavailable', 'missing_translation', 'overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'delivery_storage_failed', 'empty_translation', 'untranslated_text', 'malformed_output', 'ocr_critical_failure', 'low_ocr_confidence', 'low_translation_confidence', 'mock_provider_output']);
     const allSegmentFlags = all.flatMap(segment => segment.qaFlags);
-    const criticalFlags = [...new Set([...pageQA.flatMap(page => page.flags), ...allSegmentFlags])].filter(flag => blockerFlags.has(flag) || flag.startsWith('glossary_violation:') || flag.startsWith('character_name_inconsistent:'));
     const [pageCount] = await db().select({ count: chapters.pageCount }).from(chapters).where(eq(chapters.id, claimed.chapterId));
-    const canAutoPublish = pages.length === pageCount?.count && pageQA.length === pages.length && pageQA.every(page => page.outputKey) && criticalFlags.length === 0 && allSegmentFlags.length === 0;
+    const { canAutoPublish, criticalFlags } = checkPublication({
+      requiredPages: pageCount?.count ?? 0,
+      pageOutputs: pageQA.map(page => page.outputKey),
+      pageFlags: pageQA.flatMap(page => page.flags),
+      segmentFlags: allSegmentFlags,
+    });
     await db().transaction(async tx => {
       const [stillRunning] = await tx.select({ id: translationJobs.id }).from(translationJobs)
         .where(and(eq(translationJobs.id, job.id), eq(translationJobs.status, 'running'))).for('update');
@@ -278,7 +284,7 @@ export async function runTranslationJob(jobId: string) {
         await tx.update(chapters).set({ status: 'in_review' }).where(eq(chapters.id, claimed.chapterId));
       }
       await tx.update(translationJobs).set({ status: 'ready', stage: canAutoPublish ? 'published' : 'ready', stageProgress: 100, finishedAt: new Date(),
-        options: sql`jsonb_set(${translationJobs.options}, '{providers}', ${JSON.stringify({ ocr: serverEnv().OCR_PROVIDER, translation: serverEnv().TRANSLATION_PROVIDER, cleanup: serverEnv().IMAGE_CLEANUP_PROVIDER, typesetting: 'opentype-noto-sans' })}::jsonb, true)` })
+        options: sql`jsonb_set(${translationJobs.options}, '{providers}', ${JSON.stringify({ ocr: serverEnv().OCR_PROVIDER, translation: serverEnv().TRANSLATION_PROVIDER, cleanup: serverEnv().IMAGE_CLEANUP_PROVIDER, typesetting: `opentype-${settings.typesetFont}` })}::jsonb, true)` })
         .where(and(eq(translationJobs.id, job.id), eq(translationJobs.status, 'running')));
       const qaFlagCount = pageQA.reduce((total, page) => total + page.flags.length, 0);
       await tx.insert(translationJobLogs).values({ jobId: job.id, attempt: claimed.attempt, stage: 'qa', message: canAutoPublish ? 'Critical QA passed; chapter auto-published.' : 'QA finished; chapter held for human review.', details: { criticalFlags, flags: qaFlagCount, autoPublished: canAutoPublish } });
@@ -319,7 +325,7 @@ export async function rerenderReviewedPage(jobId: string, pageId: string): Promi
   const segments = await db().select({ id: translationSegments.id, x: translationSegments.x, y: translationSegments.y, w: translationSegments.w, h: translationSegments.h,
     text: translationSegments.translatedText, qaFlags: translationSegments.qaFlags, status: translationSegments.reviewStatus })
     .from(translationSegments).where(and(eq(translationSegments.jobId, jobId), eq(translationSegments.pageId, pageId))).orderBy(asc(translationSegments.position));
-  const visualFlags = new Set(['cleanup_failed', 'cleanup_unavailable', 'missing_translation', 'overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'delivery_storage_failed']);
+  const visualFlags = new Set(['cleanup_failed', 'cleanup_unavailable', 'missing_translation', 'missing_glyph', 'overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'delivery_storage_failed']);
   const flags = new Set<string>();
   const oldOutputKey = page.outputKey;
   try {
@@ -329,7 +335,8 @@ export async function rerenderReviewedPage(jobId: string, pageId: string): Promi
     const [originalMeta, cleanedMeta] = await Promise.all([sharp(master.bytes).metadata(), sharp(cleaned.image, { failOn: 'error' }).metadata()]);
     if (originalMeta.width !== cleanedMeta.width || originalMeta.height !== cleanedMeta.height || originalMeta.width !== page.width || originalMeta.height !== page.height) throw new Error('Page dimensions changed during cleanup.');
     if (!cleaned.inpainted) flags.add('cleanup_unavailable');
-    const rendered = await renderMongolianText(cleaned.image, segments.map(segment => ({ id: segment.id, x: segment.x, y: segment.y, w: segment.w, h: segment.h, text: segment.text ?? '' })), cleaned.inpainted);
+    const settings = await getSettings();
+    const rendered = await renderMongolianText(cleaned.image, segments.map(segment => ({ id: segment.id, x: segment.x, y: segment.y, w: segment.w, h: segment.h, text: segment.text ?? '' })), cleaned.inpainted, settings.typesetFont);
     rendered.pageFlags.forEach(flag => flags.add(flag));
     if (flags.size === 0) {
       const key = `chapters/${page.chapterId}/delivery-${page.attempt}-${String(page.pageNumber).padStart(4, '0')}-${randomInt(1000, 9999)}.png`;

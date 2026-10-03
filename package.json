@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "NODE_OPTIONS='--conditions=react-server' tsx --test server/chapter-ingestion.test.ts",
+    "test": "NODE_OPTIONS='--conditions=react-server' tsx --test server/chapter-ingestion.test.ts server/ai/typesetting.test.ts server/ai/qa.test.ts server/security-boundaries.test.ts",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",

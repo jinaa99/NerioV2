@@ -8,6 +8,7 @@ const geistMono = Geist_Mono({ subsets: ['latin'], weight: ['400', '500'], varia
 const notoKr = Noto_Sans_KR({ weight: ['500'], preload: false, variable: '--font-noto-kr' });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'),
   title: { default: 'Nerio', template: '%s · Nerio' },
   description: 'Translated manhwa, carefully typeset, published chapter by chapter.',
 };

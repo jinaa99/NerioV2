@@ -11,7 +11,11 @@ const getSeries = cache(getSeriesBySlug);
 
 export async function generateMetadata({ params }: PageProps<'/series/[id]'>): Promise<Metadata> {
   const s = await getSeries((await params).id);
-  return s ? { title: s.title, description: s.description.slice(0, 300) || undefined } : {};
+  return s ? {
+    title: s.title,
+    description: s.description.slice(0, 300) || undefined,
+    alternates: { canonical: `/series/${s.slug}` },
+  } : {};
 }
 
 export default async function Page({ params }: PageProps<'/series/[id]'>) {

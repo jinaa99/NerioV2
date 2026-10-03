@@ -6,17 +6,21 @@ import sharp from 'sharp';
 import { serverEnv } from '@/server/env';
 
 export type TextBox = { id: string; x: number; y: number; w: number; h: number; text: string };
-export type TypesetFlag = 'missing_translation' | 'overflow' | 'clipping' | 'outside_region' | 'overlapping_text' | 'unreadably_small_text';
+export type TypesetFlag = 'missing_translation' | 'missing_glyph' | 'overflow' | 'clipping' | 'outside_region' | 'overlapping_text' | 'unreadably_small_text';
 export type TypesetResult = { image: Buffer; flags: Map<string, TypesetFlag[]>; pageFlags: TypesetFlag[]; fontSizes: Map<string, number> };
 type Layout = { box: TextBox; x: number; y: number; width: number; height: number; fontSize: number; lines: string[]; top: number; pad: number; flags: TypesetFlag[] };
+export type TypesetFont = 'shonen' | 'noto-sans';
 
-let cachedFont: Font | undefined;
-async function font() {
-  if (cachedFont) return cachedFont;
-  const buffer = await readFile(path.join(process.cwd(), 'assets/fonts/NotoSans-Variable.ttf'));
+const cachedFonts = new Map<TypesetFont, Font>();
+async function font(name: TypesetFont) {
+  const cached = cachedFonts.get(name);
+  if (cached) return cached;
+  const filename = name === 'shonen' ? 'ShonenNamikus-Regular.ttf' : 'NotoSans-Variable.ttf';
+  const buffer = await readFile(path.join(process.cwd(), 'assets/fonts', filename));
   const array = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
-  cachedFont = parse(array);
-  return cachedFont;
+  const loaded = parse(array);
+  cachedFonts.set(name, loaded);
+  return loaded;
 }
 
 function wrap(text: string, maxWidth: number, size: number, f: Font): string[] {
@@ -40,6 +44,15 @@ function wrap(text: string, maxWidth: number, size: number, f: Font): string[] {
   return lines.length ? lines : [''];
 }
 
+function lineBounds(lines: string[], size: number, f: Font, lineHeight: number) {
+  const paths = lines.map((line, index) => f.getPath(line, 0, size * 0.78 + index * lineHeight, size).getBoundingBox());
+  const minX = Math.min(0, ...paths.map(bounds => bounds.x1));
+  const maxX = Math.max(0, ...paths.map(bounds => bounds.x2));
+  const minY = Math.min(0, ...paths.map(bounds => bounds.y1));
+  const maxY = Math.max(0, ...paths.map(bounds => bounds.y2));
+  return { paths, minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
+}
+
 function layout(box: TextBox, pageWidth: number, pageHeight: number, f: Font, env: ReturnType<typeof serverEnv>): Layout {
   const raw = { x: box.x * pageWidth, y: box.y * pageHeight, w: box.w * pageWidth, h: box.h * pageHeight };
   const flags: TypesetFlag[] = [];
@@ -52,28 +65,31 @@ function layout(box: TextBox, pageWidth: number, pageHeight: number, f: Font, en
   if (!box.text.trim()) flags.push('missing_translation');
   let fontSize = env.TYPESET_MIN_FONT_SIZE;
   let lines = wrap(box.text.trim(), innerWidth, fontSize, f);
-  let textHeight = fontSize * 0.85 + (lines.length - 1) * fontSize * env.TYPESET_LINE_HEIGHT;
+  let lineHeight = fontSize * env.TYPESET_LINE_HEIGHT;
+  let bounds = lineBounds(lines, fontSize, f, lineHeight);
+  let textHeight = bounds.height;
   let fit = false;
   if (box.text.trim()) {
     for (let size = Math.max(env.TYPESET_MIN_FONT_SIZE, env.TYPESET_MAX_FONT_SIZE); size >= env.TYPESET_MIN_FONT_SIZE; size -= 1) {
       const candidate = wrap(box.text.trim(), innerWidth, size, f);
-      const candidateHeight = size * 0.85 + (candidate.length - 1) * size * env.TYPESET_LINE_HEIGHT;
-      if (candidateHeight <= innerHeight && candidate.every(line => f.getAdvanceWidth(line, size) <= innerWidth)) {
-        fontSize = size; lines = candidate; textHeight = candidateHeight; fit = true; break;
+      const candidateLineHeight = size * env.TYPESET_LINE_HEIGHT;
+      const candidateBounds = lineBounds(candidate, size, f, candidateLineHeight);
+      if (candidateBounds.height <= innerHeight && candidateBounds.width <= innerWidth) {
+        fontSize = size; lines = candidate; lineHeight = candidateLineHeight; bounds = candidateBounds; textHeight = candidateBounds.height; fit = true; break;
       }
     }
     if (!fit) flags.push('overflow');
-    if (fontSize < 12) flags.push('unreadably_small_text');
+    if (fontSize < 16) flags.push('unreadably_small_text');
     if (textHeight > innerHeight) flags.push('clipping');
+    if ([...box.text].some(char => char.trim() && f.charToGlyph(char).index === 0)) flags.push('missing_glyph');
   }
-  const topText = top + (height - textHeight) / 2;
-  const widest = Math.max(0, ...lines.map(line => f.getAdvanceWidth(line, fontSize)));
-  const x = env.TYPESET_ALIGNMENT === 'left' ? left + pad : env.TYPESET_ALIGNMENT === 'right' ? right - pad - widest : left + (width - widest) / 2;
-  return { box, x, y: topText, width: widest, height: textHeight, fontSize, lines, top, pad, flags };
+  const topText = top + (height - textHeight) / 2 - bounds.minY;
+  const x = env.TYPESET_ALIGNMENT === 'left' ? left + pad - bounds.minX : env.TYPESET_ALIGNMENT === 'right' ? right - pad - bounds.maxX : left + (width - bounds.width) / 2 - bounds.minX;
+  return { box, x, y: topText, width: bounds.width, height: textHeight, fontSize, lines, top, pad, flags };
 }
 
-export async function renderMongolianText(image: Buffer, boxes: TextBox[], inpainted: boolean): Promise<TypesetResult> {
-  const env = serverEnv(); const f = await font();
+export async function renderMongolianText(image: Buffer, boxes: TextBox[], inpainted: boolean, fontName: TypesetFont = 'shonen'): Promise<TypesetResult> {
+  const env = serverEnv(); const f = await font(fontName);
   const metadata = await sharp(image, { failOn: 'error' }).metadata();
   const pageWidth = metadata.width, pageHeight = metadata.height;
   if (!pageWidth || !pageHeight) throw new Error('Could not read image dimensions for typesetting.');
@@ -106,10 +122,13 @@ export async function renderMongolianText(image: Buffer, boxes: TextBox[], inpai
     }
     const lineHeight = item.fontSize * env.TYPESET_LINE_HEIGHT;
     item.lines.forEach((line, lineIndex) => {
-      const lineWidth = f.getAdvanceWidth(line, item.fontSize);
-      const x = env.TYPESET_ALIGNMENT === 'left' ? left + item.pad : env.TYPESET_ALIGNMENT === 'right' ? right - item.pad - lineWidth : left + (width - lineWidth) / 2;
-      const baseline = item.y + item.fontSize * 0.78 + lineIndex * lineHeight;
-      const glyphPath = f.getPath(line, x, baseline, item.fontSize);
+      const baselineOffset = item.fontSize * 0.78 + lineIndex * lineHeight;
+      const relativeBounds = f.getPath(line, 0, baselineOffset, item.fontSize).getBoundingBox();
+      const desiredInkLeft = env.TYPESET_ALIGNMENT === 'left' ? left + item.pad
+        : env.TYPESET_ALIGNMENT === 'right' ? right - item.pad - (relativeBounds.x2 - relativeBounds.x1)
+          : left + (width - (relativeBounds.x2 - relativeBounds.x1)) / 2;
+      const baseline = item.y + baselineOffset;
+      const glyphPath = f.getPath(line, desiredInkLeft - relativeBounds.x1, baseline, item.fontSize);
       const outline = glyphPath.toPathData(2);
       fragments.push(`<path data-region="${index}" d="${outline}" fill="#171717"/>`);
       const bounds = glyphPath.getBoundingBox();

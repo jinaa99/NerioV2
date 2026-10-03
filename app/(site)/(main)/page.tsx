@@ -1,7 +1,10 @@
+import type { Metadata } from 'next';
 import Home, { type HomeData } from '@/components/site/Home';
 import { getCurrentActor } from '@/server/auth/actor';
 import { latestChapters, listGenres, listSeries } from '@/server/data/catalog';
 import { listContinueReading } from '@/server/data/reading';
+
+export const metadata: Metadata = { alternates: { canonical: '/' } };
 
 export default async function Page() {
   const actor = await getCurrentActor();

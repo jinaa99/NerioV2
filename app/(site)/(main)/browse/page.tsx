@@ -9,7 +9,11 @@ const LIMIT = 24;
 export async function generateMetadata({ searchParams }: PageProps<'/browse'>): Promise<Metadata> {
   const sp = await searchParams;
   const q = param(sp.q);
-  return { title: q ? `Search: ${q.slice(0, 60)}` : 'Browse series', description: 'Browse, search and filter translated manhwa on Nerio.' };
+  return {
+    title: q ? `Search: ${q.slice(0, 60)}` : 'Browse series',
+    description: 'Browse, search and filter translated manhwa on Nerio.',
+    alternates: { canonical: '/browse' },
+  };
 }
 
 export default async function Page({ searchParams }: PageProps<'/browse'>) {

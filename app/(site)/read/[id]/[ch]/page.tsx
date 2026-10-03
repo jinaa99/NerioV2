@@ -13,7 +13,10 @@ const getChapter = cache(async (slug: string, ch: string) => {
 export async function generateMetadata({ params }: PageProps<'/read/[id]/[ch]'>): Promise<Metadata> {
   const { id, ch } = await params;
   const c = await getChapter(id, ch);
-  return c ? { title: `${c.series.title} · Ch. ${chapterNo(c.number)}${c.title ? ` ${chapterName(c.number, c.title)}` : ''}` } : {};
+  return c ? {
+    title: `${c.series.title} · Ch. ${chapterNo(c.number)}${c.title ? ` ${chapterName(c.number, c.title)}` : ''}`,
+    alternates: { canonical: `/read/${c.series.slug}/${c.number}` },
+  } : {};
 }
 
 export default async function Page({ params }: PageProps<'/read/[id]/[ch]'>) {

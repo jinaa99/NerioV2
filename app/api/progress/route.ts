@@ -1,6 +1,7 @@
 import { type NextRequest } from 'next/server';
 import { saveProgress } from '@/server/data/reading';
 import { DalError } from '@/server/errors';
+import { originMatchesHost } from '@/server/security/origin';
 
 /**
  * Reader progress. A route handler rather than a Server Action so the reader can flush with
@@ -11,9 +12,7 @@ export async function POST(request: NextRequest) {
   // Same check Next.js applies to Server Actions: Origin host must match the (forwarded) host.
   const origin = request.headers.get('origin');
   const host = request.headers.get('x-forwarded-host') ?? request.headers.get('host');
-  let originHost = '';
-  try { originHost = origin ? new URL(origin).host : ''; } catch {}
-  if (!originHost || !host || originHost !== host) return new Response(null, { status: 403 });
+  if (!originMatchesHost(origin, host)) return new Response(null, { status: 403 });
   if (Number(request.headers.get('content-length') ?? 0) > 1024) return new Response(null, { status: 413 });
 
   let body: unknown;
