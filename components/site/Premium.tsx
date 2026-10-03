@@ -21,6 +21,7 @@ export default function Premium({ plans, bank, state }: { plans: PlanDTO[]; bank
   const site = useSite();
   const router = useRouter();
   const signedIn = !!site.viewer;
+  const bankConfigured = [bank.holder, bank.bank, bank.iban, bank.bic].every(value => value.trim().length > 0);
   const latest = state?.latest ?? null;
   const pending = latest?.status === 'pending' ? latest : null;
   const active = !!state?.premiumUntil && new Date(state.premiumUntil) > new Date();
@@ -36,10 +37,10 @@ export default function Premium({ plans, bank, state }: { plans: PlanDTO[]; bank
   const plan = plans.find(p => p.key === planKey)!;
   // The reference code belongs to a pending payment for the chosen plan.
   const code = pending && pending.plan === planKey ? pending.referenceCode : null;
-  const refOk = ref.trim().length >= 6;
+  const refOk = ref.trim().length >= 6 && /^[A-Za-z0-9][A-Za-z0-9 ._/#-]*[A-Za-z0-9]$/.test(ref.trim());
   const invalid = (touched && !refOk) || !!fieldErr;
   const submitted = !!pending?.submittedReference && !editing;
-  const view: 'info' | 'pending' | 'active' = submitted ? 'pending' : active && !editing && !pending ? 'active' : 'info';
+  const view: 'info' | 'pending' | 'active' = submitted ? 'pending' : active && !editing && !pending && latest?.status !== 'rejected' ? 'active' : 'info';
 
   const copy = (label: string, value: string) => {
     try { navigator.clipboard?.writeText(value); } catch {}
@@ -48,6 +49,7 @@ export default function Premium({ plans, bank, state }: { plans: PlanDTO[]; bank
     setTimeout(() => setCopied(c => (c === label ? null : c)), 1800);
   };
   const getCode = () => {
+    if (!bankConfigured) return site.toast('Bank transfer instructions are not available yet.', 'error', 'var(--danger)');
     if (!signedIn) return site.requireSignIn('Sign in to get your payment reference');
     start(async () => {
       const res = await startPaymentAction(planKey);
@@ -56,6 +58,7 @@ export default function Premium({ plans, bank, state }: { plans: PlanDTO[]; bank
     });
   };
   const submit = () => {
+    if (!bankConfigured) return site.toast('Bank transfer instructions are not available yet.', 'error', 'var(--danger)');
     if (!signedIn) return site.requireSignIn('Sign in to confirm your transfer');
     if (!pending || !code) return site.toast('Get your reference code first (step 1)', 'info', 'var(--info)');
     if (!refOk) return setTouched(true);
@@ -119,12 +122,13 @@ export default function Premium({ plans, bank, state }: { plans: PlanDTO[]; bank
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
               <span style={{ font: '400 24px var(--serif)' }}>Bank transfer details</span><span style={{ font: '500 12px var(--mono)', color: 'var(--ink-3)' }}>STEP 1 OF 2</span>
             </div>
+            {!bankConfigured && <div role="status" className="row" style={{ gap: 10, padding: '12px 14px', borderRadius: 12, background: 'rgba(230,194,106,.08)', border: '1px solid rgba(230,194,106,.2)', fontSize: 13, color: 'var(--warning-text)' }}><Icon name="info" size={18} />Bank transfer is not set up yet. Please check back later.</div>}
             <div className="stack">
               {bankRows.map(([label, value, kind, copyable]) => (
                 <div key={label} className="row" style={{ gap: 12, padding: '12px 0', borderTop: '1px solid rgba(255,255,255,.06)' }}>
                   <div className="stack grow" style={{ gap: 3 }}>
                     <span style={{ font: '500 11px var(--mono)', letterSpacing: '.08em', color: 'var(--ink-3)' }}>{label.toUpperCase()}</span>
-                    <span style={{ font: `500 15px var(${kind === 'mono' ? '--mono' : '--sans'})`, color: 'var(--ink-1)', wordBreak: 'break-all' }}>{value}</span>
+                    <span style={{ font: `500 15px var(${kind === 'mono' ? '--mono' : '--sans'})`, color: value ? 'var(--ink-1)' : 'var(--ink-3)', wordBreak: 'break-all' }}>{value || 'Not configured'}</span>
                   </div>
                   {copyable && (
                     <Button variant="secondary" h={36} px={10} fs={12} icon={copied === label ? 'check' : 'content_copy'} aria-label={`Copy ${label}`}
@@ -139,7 +143,7 @@ export default function Premium({ plans, bank, state }: { plans: PlanDTO[]; bank
                 </div>
                 {code
                   ? <Button variant="secondary" h={36} px={10} fs={12} icon={copied === 'Reference code' ? 'check' : 'content_copy'} aria-label="Copy reference code" onClick={() => copy('Reference code', code)}>{copied === 'Reference code' ? 'Copied' : 'Copy'}</Button>
-                  : <Button variant="accent" h={36} px={12} fs={13} loading={busy} onClick={getCode}>{signedIn ? 'Get code' : 'Sign in'}</Button>}
+                  : <Button variant="accent" h={36} px={12} fs={13} disabled={!bankConfigured} loading={busy} onClick={getCode}>{signedIn ? 'Get code' : 'Sign in'}</Button>}
               </div>
             </div>
             <div className="row" style={{ gap: 10, padding: '12px 14px', borderRadius: 12, background: 'rgba(230,194,106,.08)', border: '1px solid rgba(230,194,106,.2)', fontSize: 13, lineHeight: 1.5, color: 'var(--warning-text)', alignItems: 'flex-start' }}>

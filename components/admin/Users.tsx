@@ -196,7 +196,7 @@ function Payments({ payments, payStatus, go }: Extract<Props, { tab: 'payments' 
 
   const confirmPay = (p: AdminPaymentDTO) => {
     const ref = (refs[p.id] ?? '').trim();
-    if (!ref) return toast('Enter the bank transaction reference first', 'error', 'var(--danger)');
+    if (!/^[A-Za-z0-9][A-Za-z0-9 ._/#-]*[A-Za-z0-9]$/.test(ref) || ref.length < 6) return toast('Enter a valid bank transaction reference (at least 6 characters)', 'error', 'var(--danger)');
     setBusy(p.id);
     start(async () => {
       const res = await confirmPaymentAction(p.id, ref);
@@ -222,7 +222,7 @@ function Payments({ payments, payStatus, go }: Extract<Props, { tab: 'payments' 
   return (
     <div className="stack" style={{ gap: 10 }}>
       <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-        <Segmented h={30} options={[['pending', 'Pending'], ['confirmed', 'Confirmed'], ['rejected', 'Not received']]} value={payStatus} onChange={v => go(v === 'pending' ? 'tab=payments' : `tab=payments&status=${v}`)} />
+        <Segmented h={30} options={[['pending', 'Pending'], ['confirmed', 'Approved'], ['rejected', 'Rejected']]} value={payStatus} onChange={v => go(v === 'pending' ? 'tab=payments' : `tab=payments&status=${v}`)} />
         <span className="meta" style={{ marginLeft: 'auto' }}>{payments.total} PAYMENTS</span>
       </div>
       {payStatus === 'pending' && <span style={{ fontSize: 13, color: 'var(--ink-3)' }}>Match each claim against your bank statement using the reference code, enter the bank’s transaction reference, then confirm to activate Premium.</span>}
@@ -241,6 +241,7 @@ function Payments({ payments, payStatus, go }: Extract<Props, { tab: 'payments' 
               <span className="ellipsis" style={{ font: '400 11px var(--mono)', color: 'var(--ink-3)' }} suppressHydrationWarning>{p.email} · {timeAgo(p.createdAt).toUpperCase()}</span>
             </div>
             <Col label="CODE" min={120} color="var(--ember-text)">{p.referenceCode}</Col>
+            <Col label="USER REF" min={130}>{p.submittedReference ?? 'Not submitted'}</Col>
             {p.status === 'pending'
               ? <label className="stack" style={{ gap: 2, minWidth: 150 }}>
                   <span style={{ font: '400 10px var(--mono)', color: 'var(--ink-3)' }}>BANK REF</span>
@@ -256,7 +257,7 @@ function Payments({ payments, payStatus, go }: Extract<Props, { tab: 'payments' 
               </div>
             ) : (
               <span className={`badge xs ${p.status === 'confirmed' ? 'success' : 'danger'}`} style={{ padding: '4px 8px', borderRadius: 6 }} title={p.notes ?? undefined}>
-                {p.status === 'confirmed' ? `CONFIRMED · UNTIL ${shortDate(p.periodEnd).toUpperCase()}` : 'MARKED NOT RECEIVED'}
+                {p.status === 'confirmed' ? `APPROVED · UNTIL ${shortDate(p.periodEnd).toUpperCase()}` : 'REJECTED'}
               </span>
             )}
           </div>

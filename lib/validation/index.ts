@@ -240,4 +240,6 @@ export type CharacterInput = z.input<typeof characterInput>;
 
 export const premiumPlan = z.enum(['1m', '3m', '12m']);
 export const createPaymentInput = z.object({ plan: premiumPlan }).strict();
+export const bankTransactionReference = z.string().trim().min(6, 'Enter a transaction reference (at least 6 characters).').max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9 ._/#-]*[A-Za-z0-9]$/, 'Use letters, numbers, spaces, and common reference punctuation only.');
 export type CreatePaymentInput = z.input<typeof createPaymentInput>;

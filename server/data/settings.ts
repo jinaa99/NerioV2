@@ -39,10 +39,10 @@ export const DEFAULT_SETTINGS: Settings = {
   pausePipeline: false,
   ocrEngine: 'nerio-ocr-v3',
   typesetFont: 'comic-neue',
-  bankHolder: 'Nerio Media Ltd.',
-  bankName: 'Northbank AG · Berlin',
-  bankIban: 'DE89 3704 0044 0532 0130 00',
-  bankBic: 'NRBKDEFFXXX',
+  bankHolder: '',
+  bankName: '',
+  bankIban: '',
+  bankBic: '',
 };
 
 const KEYS = Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[];

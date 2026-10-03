@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { char, check, index, integer, pgTable, text, uuid, varchar } from 'drizzle-orm/pg-core';
+import { char, check, index, integer, pgTable, text, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
 import { id, timestamps, tstz } from './_shared';
 import { paymentMethod, paymentStatus, premiumPlan } from './enums';
 import { users } from './identity';
@@ -22,6 +22,8 @@ export const paymentRecords = pgTable('payment_records', {
   referenceCode: varchar({ length: 32 }).notNull().unique(),
   /** Bank/SEPA transaction id entered by the admin on confirmation. */
   externalReference: varchar({ length: 128 }),
+  /** Reader-provided receipt/transaction reference; kept separate from the bank-verified reference. */
+  submittedReference: varchar({ length: 128 }),
   reviewedBy: uuid().references(() => users.id, { onDelete: 'set null' }),
   reviewedAt: tstz(),
   /** Premium window granted by this payment (set on confirmation). */
@@ -32,6 +34,7 @@ export const paymentRecords = pgTable('payment_records', {
 }, t => [
   index('payment_records_user_idx').on(t.userId, t.createdAt.desc()),
   index('payment_records_status_idx').on(t.status, t.createdAt),
+  uniqueIndex('payment_records_pending_user_plan_uq').on(t.userId, t.plan).where(sql`${t.status} = 'pending'`),
   check('payment_records_amount_positive', sql`${t.amountCents} > 0`),
   check('payment_records_period_positive', sql`${t.periodDays} > 0`),
   check('payment_records_currency_upper', sql`${t.currency} ~ '^[A-Z]{3}$'`),

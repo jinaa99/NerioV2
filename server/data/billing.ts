@@ -4,14 +4,15 @@ import 'server-only';
  * admin confirms it against the bank statement, which grants Premium.
  */
 import { randomBytes } from 'node:crypto';
-import { and, count, desc, eq } from 'drizzle-orm';
-import { createPaymentInput, pagination, type CreatePaymentInput, type Pagination } from '@/lib/validation';
+import { and, count, desc, eq, sql } from 'drizzle-orm';
+import { bankTransactionReference, createPaymentInput, pagination, type CreatePaymentInput, type Pagination } from '@/lib/validation';
 import { z } from 'zod';
 import { requireActor, requireRole } from '../auth/actor';
 import { db } from '../db/client';
 import { notifications, paymentRecords, profiles, users } from '../db/schema';
 import { DalError, parseInput } from '../errors';
 import { recordAudit } from './audit';
+import { getSettings } from './settings';
 
 type Plan = (typeof paymentRecords.$inferSelect)['plan'];
 
@@ -24,6 +25,7 @@ export const PLANS: Record<Plan, { periodDays: number; amountCents: number; curr
 
 // Unambiguous alphabet (no 0/O, 1/I) for codes typed into bank transfer memos.
 const ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+const uniqueViolation = (error: unknown) => typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
 function referenceCode() {
   const bytes = randomBytes(6);
   return `NER-${Array.from(bytes, b => ALPHABET[b % ALPHABET.length]).join('')}`;
@@ -39,20 +41,36 @@ const myPaymentColumns = {
 export async function createPendingPayment(input: CreatePaymentInput) {
   const actor = await requireActor();
   const { plan } = parseInput(createPaymentInput, input);
-  const price = PLANS[plan];
-
-  const [existing] = await db().select(myPaymentColumns).from(paymentRecords)
-    .where(and(eq(paymentRecords.userId, actor.userId), eq(paymentRecords.status, 'pending'), eq(paymentRecords.plan, plan)));
-  if (existing) return existing;
-
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const [row] = await db().insert(paymentRecords)
-      .values({ userId: actor.userId, plan, ...price, referenceCode: referenceCode() })
-      .onConflictDoNothing({ target: paymentRecords.referenceCode })
-      .returning(myPaymentColumns);
-    if (row) return row;
+  const settings = await getSettings();
+  if (![settings.bankHolder, settings.bankName, settings.bankIban, settings.bankBic].every(value => value.trim())) {
+    throw new DalError('CONFLICT', 'Bank transfer details are not configured yet. Please try again later.');
   }
-  throw new DalError('CONFLICT', 'Couldn’t create a payment reference. Try again.');
+  const price = PLANS[plan];
+  return db().transaction(async tx => {
+    // Serialize plan changes and inserts for this user; the partial unique index is the DB backstop.
+    await tx.select({ id: users.id }).from(users).where(eq(users.id, actor.userId)).for('update');
+    const [existing] = await tx.select(myPaymentColumns).from(paymentRecords)
+      .where(and(eq(paymentRecords.userId, actor.userId), eq(paymentRecords.status, 'pending'))).orderBy(desc(paymentRecords.createdAt)).limit(1).for('update');
+    if (existing) {
+      if (existing.plan === plan) return existing;
+      const [row] = await tx.update(paymentRecords).set({ plan, ...price, updatedAt: new Date() })
+        .where(and(eq(paymentRecords.id, existing.id), eq(paymentRecords.status, 'pending'), sql`${paymentRecords.submittedReference} is null`))
+        .returning(myPaymentColumns);
+      if (row) return row;
+      throw new DalError('CONFLICT', 'A transfer is already submitted and waiting for review.');
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const [row] = await tx.insert(paymentRecords)
+        .values({ userId: actor.userId, plan, ...price, referenceCode: referenceCode() })
+        .onConflictDoNothing()
+        .returning(myPaymentColumns);
+      if (row) return row;
+      const [concurrent] = await tx.select(myPaymentColumns).from(paymentRecords)
+        .where(and(eq(paymentRecords.userId, actor.userId), eq(paymentRecords.status, 'pending')));
+      if (concurrent) return concurrent;
+    }
+    throw new DalError('CONFLICT', 'Couldn’t create a payment reference. Try again.');
+  });
 }
 
 export async function listMyPayments() {
@@ -64,7 +82,7 @@ const statuses = ['pending', 'confirmed', 'rejected', 'refunded'] as const;
 
 export type AdminPaymentDTO = {
   id: string; plan: Plan; amountCents: number; currency: string; status: (typeof statuses)[number]; referenceCode: string;
-  externalReference: string | null; createdAt: Date; reviewedAt: Date | null; periodEnd: Date | null; notes: string | null;
+  submittedReference: string | null; externalReference: string | null; createdAt: Date; reviewedAt: Date | null; periodEnd: Date | null; notes: string | null;
   userId: string; email: string; displayName: string | null;
 };
 
@@ -76,7 +94,7 @@ export async function listPayments(input: Pagination & { status?: (typeof status
     db()
       .select({
         id: paymentRecords.id, plan: paymentRecords.plan, amountCents: paymentRecords.amountCents, currency: paymentRecords.currency,
-        status: paymentRecords.status, referenceCode: paymentRecords.referenceCode, externalReference: paymentRecords.externalReference,
+        status: paymentRecords.status, referenceCode: paymentRecords.referenceCode, submittedReference: paymentRecords.submittedReference, externalReference: paymentRecords.externalReference,
         createdAt: paymentRecords.createdAt, reviewedAt: paymentRecords.reviewedAt, periodEnd: paymentRecords.periodEnd, notes: paymentRecords.notes,
         userId: users.id, email: users.email, displayName: profiles.displayName,
       })
@@ -102,11 +120,16 @@ const PLAN_LABEL: Record<Plan, string> = { '1m': '1 month', '3m': '3 months', '1
 export async function confirmPayment(paymentId: string, externalReference: string) {
   const actor = await requireRole('admin');
   const id = parseInput(z.uuid(), paymentId);
-  const bankRef = parseInput(z.string().trim().min(1, 'Enter the bank transaction reference').max(128), externalReference);
-  return db().transaction(async tx => {
-    const [p] = await tx.select({ userId: paymentRecords.userId, periodDays: paymentRecords.periodDays, plan: paymentRecords.plan, amountCents: paymentRecords.amountCents })
+  const bankRef = parseInput(bankTransactionReference, externalReference).toUpperCase();
+  try { return await db().transaction(async tx => {
+    const [p] = await tx.select({ userId: paymentRecords.userId, periodDays: paymentRecords.periodDays, plan: paymentRecords.plan, amountCents: paymentRecords.amountCents, submittedReference: paymentRecords.submittedReference })
       .from(paymentRecords).where(and(eq(paymentRecords.id, id), eq(paymentRecords.status, 'pending'))).for('update');
     if (!p) throw new DalError('CONFLICT', 'This payment isn’t pending anymore.');
+    if (!p.submittedReference) throw new DalError('CONFLICT', 'The reader has not submitted their transfer reference yet.');
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(lower(${bankRef}), 0))`);
+    const [duplicate] = await tx.select({ id: paymentRecords.id }).from(paymentRecords)
+      .where(and(sql`lower(${paymentRecords.externalReference}) = lower(${bankRef})`, sql`${paymentRecords.id} <> ${id}`)).limit(1);
+    if (duplicate) throw new DalError('CONFLICT', 'That bank transaction reference is already recorded on another payment.');
     const [prof] = await tx.select({ until: profiles.premiumUntil }).from(profiles).where(eq(profiles.userId, p.userId)).for('update');
     const now = new Date();
     const start = prof?.until && prof.until > now ? prof.until : now;
@@ -119,9 +142,12 @@ export async function confirmPayment(paymentId: string, externalReference: strin
       body: `Your ${PLAN_LABEL[p.plan]} transfer arrived. Premium runs until ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}.`,
       href: '/premium', data: { paymentId: id },
     });
-    await recordAudit(tx, actor, { action: 'payment.confirm', targetType: 'payment', targetId: id, metadata: { userId: p.userId, plan: p.plan, amountCents: p.amountCents, bankRef, premiumUntil: end.toISOString() } });
+    await recordAudit(tx, actor, { action: 'payment.confirm', targetType: 'payment', targetId: id, metadata: { userId: p.userId, plan: p.plan, amountCents: p.amountCents, premiumUntil: end.toISOString() } });
     return { premiumUntil: end };
-  });
+  }); } catch (error) {
+    if (uniqueViolation(error)) throw new DalError('CONFLICT', 'That bank transaction reference is already recorded on another payment.');
+    throw error;
+  }
 }
 
 /** Mark a claimed transfer as not received. Audited; the reader is notified. */
@@ -139,7 +165,7 @@ export async function rejectPayment(paymentId: string, note: string) {
       body: reason || `No transfer with reference ${p.referenceCode} has arrived. Check the reference code and try again.`,
       href: '/premium', data: { paymentId: id },
     });
-    await recordAudit(tx, actor, { action: 'payment.reject', targetType: 'payment', targetId: id, metadata: { userId: p.userId, note: reason || null } });
+    await recordAudit(tx, actor, { action: 'payment.reject', targetType: 'payment', targetId: id, metadata: { userId: p.userId } });
   });
 }
 
@@ -164,7 +190,7 @@ export async function getMyPremiumState(): Promise<MyPremiumStateDTO> {
     db().select({ until: profiles.premiumUntil }).from(profiles).where(eq(profiles.userId, actor.userId)),
     db().select({
       id: paymentRecords.id, plan: paymentRecords.plan, amountCents: paymentRecords.amountCents, currency: paymentRecords.currency, status: paymentRecords.status,
-      referenceCode: paymentRecords.referenceCode, submittedReference: paymentRecords.externalReference, createdAt: paymentRecords.createdAt,
+      referenceCode: paymentRecords.referenceCode, submittedReference: paymentRecords.submittedReference, createdAt: paymentRecords.createdAt,
       periodEnd: paymentRecords.periodEnd, notes: paymentRecords.notes,
     }).from(paymentRecords).where(eq(paymentRecords.userId, actor.userId)).orderBy(desc(paymentRecords.createdAt)).limit(1),
   ]);
@@ -175,10 +201,16 @@ export async function getMyPremiumState(): Promise<MyPremiumStateDTO> {
 export async function submitTransfer(paymentId: string, reference: string) {
   const actor = await requireActor();
   const id = parseInput(z.uuid(), paymentId);
-  const ref = parseInput(z.string().trim().min(6, 'Enter the reference from your bank receipt (at least 6 characters).').max(128), reference);
-  const [row] = await db().update(paymentRecords).set({ externalReference: ref })
-    .where(and(eq(paymentRecords.id, id), eq(paymentRecords.userId, actor.userId), eq(paymentRecords.status, 'pending')))
-    .returning({ id: paymentRecords.id });
-  if (!row) throw new DalError('NOT_FOUND', 'Payment not found.');
-  return row;
+  const ref = parseInput(bankTransactionReference, reference).toUpperCase();
+  return db().transaction(async tx => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(lower(${ref}), 0))`);
+    const [duplicate] = await tx.select({ id: paymentRecords.id }).from(paymentRecords)
+      .where(and(sql`lower(${paymentRecords.submittedReference}) = lower(${ref})`, sql`${paymentRecords.id} <> ${id}`)).limit(1);
+    if (duplicate) throw new DalError('CONFLICT', 'That transaction reference was already submitted. Check the reference and try again.');
+    const [row] = await tx.update(paymentRecords).set({ submittedReference: ref })
+      .where(and(eq(paymentRecords.id, id), eq(paymentRecords.userId, actor.userId), eq(paymentRecords.status, 'pending')))
+      .returning({ id: paymentRecords.id });
+    if (!row) throw new DalError('NOT_FOUND', 'Payment not found.');
+    return row;
+  });
 }
