@@ -1,12 +1,9 @@
-import { and, eq, isNull, sql } from 'drizzle-orm';
-import { createHash, randomUUID } from 'node:crypto';
+import { after } from 'next/server';
 import { requireRole } from '@/server/auth/actor';
-import { db } from '@/server/db/client';
-import { chapterPages, chapters, series, translationJobLogs, translationJobs } from '@/server/db/schema';
-import { IngestionError, inspectChapterZip } from '@/server/chapter-ingestion';
-import { putImage, deleteImage } from '@/server/storage';
+import { IngestFailure, ingestChapterUpload, type IngestEvent, type IngestResult } from '@/server/ingest';
 import { serverEnv } from '@/server/env';
-import { recordAudit } from '@/server/data/audit';
+import { getSettings } from '@/server/data/settings';
+import { enqueueTranslationJobs } from '@/server/ai/worker';
 import { originMatchesUrl } from '@/server/security/origin';
 
 export const runtime = 'nodejs';
@@ -14,6 +11,11 @@ export const maxDuration = 300;
 
 const jsonError = (message: string, status: number, code: string) => Response.json({ error: message, code }, { status });
 
+/**
+ * Upload one chapter ZIP. Responds with JSON, or — when the client sends `Accept: application/x-ndjson` — streams
+ * progress events (validating, extracting, sorting, processing_images, storing) followed by a result or error line.
+ * Manual-workflow uploads start OCR in the background right away.
+ */
 export async function POST(request: Request) {
   let actor;
   try { actor = await requireRole('editor'); }
@@ -24,53 +26,45 @@ export async function POST(request: Request) {
   let form: FormData;
   try { form = await request.formData(); }
   catch { return jsonError('Could not read the upload. Send a multipart form with a ZIP file.', 400, 'invalid_upload'); }
-  const file = form.get('file');
-  const seriesId = String(form.get('seriesId') ?? '');
-  const number = Number(form.get('number'));
-  const title = String(form.get('title') ?? '').trim().slice(0, 200) || null;
-  if (!(file instanceof File)) return jsonError('Choose a ZIP file to upload.', 400, 'missing_file');
-  if (!/^[0-9a-f-]{36}$/i.test(seriesId) || !Number.isFinite(number) || number < 0 || number > 99999) return jsonError('Choose a valid series and chapter number.', 400, 'invalid_chapter');
-  if (file.size > serverEnv().CHAPTER_ZIP_MAX_BYTES) return jsonError('ZIP file exceeds the upload size limit.', 413, 'zip_too_large');
-  const zipData = Buffer.from(await file.arrayBuffer());
-  let pages;
-  try { pages = await inspectChapterZip(zipData, file.name, file.type); }
-  catch (error) {
-    if (error instanceof IngestionError) return jsonError(error.message, error.code === 'zip_too_large' ? 413 : 422, error.code);
-    return jsonError('The ZIP could not be processed. Verify the archive and try again.', 422, 'invalid_zip');
+
+  const startOcr = async (result: IngestResult) => {
+    if (result.workflow !== 'manual' || result.replayed || (await getSettings()).pausePipeline) return;
+    const { done } = await enqueueTranslationJobs(actor, [result.jobId]);
+    after(() => done);
+  };
+
+  if (!(request.headers.get('accept') ?? '').includes('application/x-ndjson')) {
+    try {
+      const result = await ingestChapterUpload(actor, form);
+      await startOcr(result);
+      return Response.json(result, { status: result.replayed ? 200 : 201 });
+    } catch (error) {
+      if (error instanceof IngestFailure) return jsonError(error.message, error.status, error.code);
+      return jsonError('The ZIP could not be processed. Verify the archive and try again.', 500, 'ingest_failed');
+    }
   }
-  const [seriesRow] = await db().select({ id: series.id, sourceLanguage: series.sourceLanguage }).from(series).where(and(eq(series.id, seriesId), isNull(series.deletedAt)));
-  if (!seriesRow) return jsonError('Series not found.', 404, 'series_not_found');
-  const operationKey = createHash('sha256').update(`${actor.userId}:${seriesId}:${number}:`).update(zipData).digest('hex');
-  const [prior] = await db().select({ chapterId: translationJobs.chapterId, jobId: translationJobs.id, pageCount: chapters.pageCount }).from(translationJobs)
-    .innerJoin(chapters, eq(chapters.id, translationJobs.chapterId)).where(sql`${translationJobs.options}->>'operationKey' = ${operationKey}`).limit(1);
-  if (prior) return Response.json({ chapterId: prior.chapterId, jobId: prior.jobId, pageCount: prior.pageCount, replayed: true }, { status: 200 });
-  const token = randomUUID();
-  const keys = pages.map((_, i) => `chapters/${token}/${String(i + 1).padStart(4, '0')}.png`);
-  const stored: string[] = [];
-  try {
-    for (let i = 0; i < pages.length; i++) { await putImage(keys[i], pages[i].bytes); stored.push(keys[i]); }
-  } catch {
-    await Promise.all(stored.map(deleteImage));
-    return jsonError('Image storage failed while saving chapter pages. Try again.', 503, 'storage_error');
-  }
-  try {
-    const result = await db().transaction(async tx => {
-      const [chapter] = await tx.insert(chapters).values({ seriesId, number, title, status: 'processing', pageCount: pages.length, createdBy: actor.userId }).returning({ id: chapters.id, number: chapters.number });
-      await tx.insert(chapterPages).values(pages.map((page, i) => ({ chapterId: chapter.id, pageNumber: i + 1, sourceKey: keys[i], originalFilename: page.filename.slice(-512), contentHash: page.hash, width: page.width, height: page.height, bytes: page.bytes.length })));
-      const [job] = await tx.insert(translationJobs).values({ chapterId: chapter.id, sourceLanguage: seriesRow.sourceLanguage, requestedBy: actor.userId, options: { ingestion: true, operationKey }, stage: 'queued' }).returning({ id: translationJobs.id });
-      await tx.insert(translationJobLogs).values([
-        { jobId: job.id, attempt: 1, stage: 'validating', message: 'ZIP structure and upload limits validated.' },
-        { jobId: job.id, attempt: 1, stage: 'processing_images', message: `Extracted, decoded and normalized ${pages.length} page images.` },
-        { jobId: job.id, attempt: 1, stage: 'queued', message: `Saved ${pages.length} master pages; queued OCR and translation.` },
-      ]);
-      await recordAudit(tx, actor, { action: 'chapter.upload', targetType: 'chapter', targetId: chapter.id, metadata: { seriesId, number: chapter.number, pages: pages.length, mode: 'zip', jobId: job.id } });
-      return { chapterId: chapter.id, jobId: job.id, pageCount: pages.length };
-    });
-    return Response.json(result, { status: 201 });
-  } catch (error) {
-    await Promise.all(stored.map(deleteImage));
-    const cause = error as { code?: string; constraint?: string };
-    if (cause.code === '23505') return jsonError('That chapter number already exists in this series.', 409, 'chapter_exists');
-    return jsonError('Chapter records could not be saved. Check the series and try again.', 500, 'database_error');
-  }
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (line: object) => controller.enqueue(encoder.encode(`${JSON.stringify(line)}\n`));
+      // Extraction reports every entry; forward at most one event per phase step change to keep the stream small.
+      let last = '';
+      const progress = (event: IngestEvent) => {
+        const key = `${event.phase}:${event.total ? Math.floor((event.done / event.total) * 20) : 0}`;
+        if (key === last && event.done !== event.total) return;
+        last = key; send({ type: 'progress', ...event });
+      };
+      try {
+        const result = await ingestChapterUpload(actor, form, progress);
+        await startOcr(result);
+        send({ type: 'result', status: result.replayed ? 200 : 201, ...result });
+      } catch (error) {
+        const failure = error instanceof IngestFailure ? error : new IngestFailure(500, 'ingest_failed', 'The ZIP could not be processed. Verify the archive and try again.');
+        send({ type: 'error', status: failure.status, code: failure.code, error: failure.message });
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
 }

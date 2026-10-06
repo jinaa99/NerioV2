@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useState, useTransition } from 'react';
 import { Button, Icon, Segmented } from '@/components/ui';
 import { chapterNo } from '@/lib/catalog';
+import { chapterFromName, naturalCompare } from '@/lib/chapter-files';
 import { publishUploadedAction, uploadChapterAction } from '@/server/actions/admin';
 import { PIPELINE_STAGE_DESC, PIPELINE_STAGE_LABEL, PIPELINE_STAGE_ORDER } from './pipeline-ui';
 import { useAdmin } from './store';
@@ -12,8 +13,10 @@ import { useAdmin } from './store';
 type SeriesOption = { id: string; title: string; sourceLanguage: string; nextNumber: number };
 type Measured = { url: string; width: number; height: number };
 type Result = { chapterId: string; jobId: string | null; series: string; number: number; pages: number; mode: 'process' | 'direct'; published?: boolean };
+type BatchItem = { key: string; file: File; number: string; status: 'waiting' | 'uploading' | 'uploaded' | 'error'; error?: string; jobId?: string; chapterId?: string; pages?: number };
 
-const SOURCES: [string, string][] = [['ko', 'Korean'], ['ja', 'Japanese'], ['zh', 'Chinese']];
+
+const SOURCES: [string, string][] = [['en', 'English'], ['ko', 'Korean'], ['ja', 'Japanese'], ['zh', 'Chinese']];
 const TARGETS: [string, string][] = [['mn', 'Mongolian'], ['en', 'English'], ['es', 'Spanish'], ['id', 'Indonesian']];
 
 /** Load each image in the browser to read its size; the server only stores what it's given. */
@@ -42,7 +45,9 @@ export default function Upload({ options, initialSeries }: { options: SeriesOpti
   const [phase, setPhase] = useState<'form' | 'checking' | 'saving' | 'done'>('form');
   const [checked, setChecked] = useState(0);
   const [result, setResult] = useState<Result | null>(null);
-  const [zip, setZip] = useState<File | null>(null);
+  const [batch, setBatch] = useState<BatchItem[]>([]);
+  const [autoRun, setAutoRun] = useState(true);
+  const [batchPhase, setBatchPhase] = useState<'idle' | 'uploading' | 'done'>('idle');
   const [publishing, startPublish] = useTransition();
   const locked = phase !== 'form';
   const series = options.find(o => o.id === seriesId);
@@ -93,32 +98,61 @@ export default function Upload({ options, initialSeries }: { options: SeriesOpti
     toast(`Chapter ${chapterNo(result.number)} published`);
   });
 
-  const uploadZip = async () => {
+  const chooseZips = (files: FileList | null) => {
+    const list = [...(files ?? [])].sort((x, y) => naturalCompare(x.name, y.name));
+    const used = new Set<number>(); let next = series?.nextNumber ?? 1;
+    setBatch(list.map((file, i) => {
+      let n = list.length === 1 && Number(num) >= 0 && !chapterFromName(file.name) ? Number(num) : chapterFromName(file.name);
+      if (n === null || !Number.isFinite(n) || used.has(n)) { while (used.has(next)) next++; n = next; }
+      used.add(n);
+      return { key: `${i}-${file.name}-${file.size}`, file, number: String(n), status: 'waiting' };
+    }));
+    setBatchPhase('idle'); setErr('');
+  };
+  const patch = (key: string, value: Partial<BatchItem>) => setBatch(items => items.map(item => item.key === key ? { ...item, ...value } : item));
+
+  const uploadZips = async () => {
     setErr('');
-    if (!zip) return setErr('Choose a chapter ZIP file.');
-    setPhase('saving');
-    const body = new FormData();
-    body.set('file', zip);
-    body.set('seriesId', seriesId);
-    body.set('number', num);
-    body.set('title', title);
-    try {
-      const response = await fetch('/api/admin/chapters/ingest', { method: 'POST', body });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? 'Chapter upload failed.');
-      setResult({ chapterId: data.chapterId, jobId: data.jobId, series: series?.title ?? '', number: Number(num), pages: data.pageCount, mode: 'process' });
-      setPhase('done');
-      toast(`Chapter ${chapterNo(Number(num))} uploaded and queued`);
-      router.refresh();
-    } catch (error) {
-      setPhase('form');
-      setErr(error instanceof Error ? error.message : 'Chapter upload failed.');
+    if (!batch.length) return setErr('Choose one or more chapter ZIP files.');
+    const numbers = batch.map(item => Number(item.number));
+    if (numbers.some(n => !Number.isFinite(n) || n < 0)) return setErr('Every ZIP needs a chapter number.');
+    if (new Set(numbers).size !== numbers.length) return setErr('Two ZIP files have the same chapter number.');
+    setBatchPhase('uploading');
+    const jobIds: string[] = [];
+    for (const item of batch) {
+      if (item.status === 'uploaded') { if (item.jobId) jobIds.push(item.jobId); continue; }
+      patch(item.key, { status: 'uploading', error: undefined });
+      const body = new FormData();
+      body.set('file', item.file);
+      body.set('seriesId', seriesId);
+      body.set('number', item.number);
+      body.set('title', batch.length === 1 ? title : '');
+      body.set('sourceLanguage', source);
+      body.set('targetLanguage', target);
+      try {
+        const response = await fetch('/api/admin/chapters/ingest', { method: 'POST', body });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error ?? 'Chapter upload failed.');
+        patch(item.key, { status: 'uploaded', jobId: data.jobId, chapterId: data.chapterId, pages: data.pageCount });
+        if (data.jobId) jobIds.push(data.jobId);
+      } catch (error) {
+        patch(item.key, { status: 'error', error: error instanceof Error ? error.message : 'Chapter upload failed.' });
+      }
     }
+    setBatchPhase('done');
+    if (autoRun && jobIds.length) {
+      try {
+        const response = await fetch('/api/admin/pipeline/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jobIds }) });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) toast(data.error ?? 'Uploaded, but translation could not be started.', 'error', 'var(--danger)');
+        else toast(`${jobIds.length} chapter${jobIds.length === 1 ? '' : 's'} uploaded · translating in the background`);
+      } catch { toast('Uploaded, but translation could not be started.', 'error', 'var(--danger)'); }
+    } else if (jobIds.length) toast(`${jobIds.length} chapter${jobIds.length === 1 ? '' : 's'} uploaded and queued`);
+    router.refresh();
   };
 
   const reset = () => {
     setPhase('form'); setResult(null); setUrls(''); setTitle('');
-    setZip(null);
     setNum(String((result?.number ?? 0) + 1));
   };
 
@@ -173,11 +207,38 @@ export default function Upload({ options, initialSeries }: { options: SeriesOpti
             placeholder={'https://cdn.example.com/ch12/001.webp\nhttps://cdn.example.com/ch12/002.webp'} style={{ height: 'auto', padding: '10px 12px', fontSize: 12, lineHeight: 1.6, resize: 'vertical' }} />
           <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>One https URL per line, in reading order · JPG, PNG or WEBP · up to 300 pages{list.length ? ` · ${list.length} added` : ''}</span>
         </div>
-        <div className="dropzone" style={{ cursor: 'default', alignItems: 'stretch', textAlign: 'left', padding: 14, gap: 8 }}>
-          <span className="row" style={{ gap: 8, font: '600 14px var(--sans)' }}><Icon name="folder_zip" size={20} color="var(--ink-2)" />Chapter ZIP</span>
-          <input aria-label="Chapter ZIP file" className="a-input" type="file" accept=".zip,application/zip" disabled={locked} onChange={e => setZip(e.target.files?.[0] ?? null)} />
-          <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>JPG, PNG, WEBP or AVIF pages · ordered by numbered filenames · up to 250 MB</span>
-          <Button variant="secondary" h={40} fs={13} disabled={locked || !zip} loading={phase === 'saving'} onClick={uploadZip}>Validate, optimize and upload ZIP</Button>
+        <div className="dropzone" style={{ cursor: 'default', alignItems: 'stretch', textAlign: 'left', padding: 14, gap: 10 }}>
+          <span className="row" style={{ gap: 8, font: '600 14px var(--sans)' }}><Icon name="folder_zip" size={20} color="var(--ink-2)" />Chapter ZIPs</span>
+          <input aria-label="Chapter ZIP files" className="a-input" type="file" multiple accept=".zip,.cbz,application/zip" disabled={locked || batchPhase === 'uploading'} onChange={e => chooseZips(e.target.files)} />
+          <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>Want to translate by hand? Use <Link href="/admin/batch" style={{ color: 'var(--ember-text)' }}>Batch translate</Link> (OCR only, no AI translation). Select one or many ZIPs (one chapter each) · any page size · JPG, PNG, WEBP, AVIF, GIF or TIFF · chapter numbers are read from the file names · up to 250 MB each</span>
+          {batch.length > 0 && (
+            <div className="stack" style={{ gap: 6 }}>
+              {batch.map(item => (
+                <div key={item.key} className="row" style={{ gap: 8, padding: '6px 8px', borderRadius: 8, background: 'var(--s2)', fontSize: 12, flexWrap: 'wrap' }}>
+                  <span className="ellipsis grow" style={{ minWidth: 120 }} title={item.file.name}>{item.file.name}</span>
+                  <label className="row" style={{ gap: 4 }}>Ch.
+                    <input aria-label={`Chapter number for ${item.file.name}`} className="a-input mono" inputMode="decimal" value={item.number} disabled={batchPhase === 'uploading' || item.status === 'uploaded'}
+                      onChange={e => patch(item.key, { number: e.target.value.replace(/[^0-9.]/g, '') })} style={{ width: 72, height: 28, fontSize: 12 }} />
+                  </label>
+                  <span className={`badge xs ${item.status === 'uploaded' ? 'success' : item.status === 'error' ? 'danger' : item.status === 'uploading' ? 'ember' : 'neutral'}`}>
+                    {item.status === 'uploaded' ? `${item.pages} PAGES` : item.status.toUpperCase()}
+                  </span>
+                  {item.chapterId && <Link href={`/admin/chapters/${item.chapterId}`} style={{ color: 'var(--ember-text)' }}>Open</Link>}
+                  {item.error && <span style={{ flexBasis: '100%', color: 'var(--danger-text)' }}>{item.error}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          <label className="row" style={{ gap: 8, fontSize: 13 }}>
+            <input type="checkbox" checked={autoRun} disabled={batchPhase === 'uploading'} onChange={e => setAutoRun(e.target.checked)} />
+            Start OCR &amp; translation right after upload
+          </label>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <Button variant="secondary" h={40} fs={13} disabled={locked || !batch.length || batchPhase === 'uploading' || batch.every(item => item.status === 'uploaded')} loading={batchPhase === 'uploading'} onClick={uploadZips}>
+              {batchPhase === 'uploading' ? `Uploading ${batch.filter(item => item.status === 'uploaded').length + 1}/${batch.length}…` : batch.some(item => item.status === 'error') ? 'Retry failed uploads' : `Upload ${batch.length || ''} ZIP${batch.length === 1 ? '' : 's'}`}
+            </Button>
+            {batchPhase === 'done' && <Link href="/admin/processing?filter=active" className="btn btn-primary" style={{ '--h': '40px', '--fs': '13px', color: 'var(--bg)' } as React.CSSProperties}>View in processing</Link>}
+          </div>
         </div>
         {err && (
           <div role="alert" className="row" style={{ gap: 10, padding: 12, borderRadius: 10, background: 'rgba(229,103,92,.08)', border: '1px solid rgba(229,103,92,.25)', fontSize: 13, color: 'var(--danger-text)' }}>

@@ -92,6 +92,13 @@
       "when": 1791465600000,
       "tag": "0012_payment_reference_safety",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1791552000000,
+      "tag": "0013_manual_translation_workflow",
+      "breakpoints": true
     }
   ]
 }

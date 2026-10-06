@@ -11,6 +11,7 @@ export const SECTIONS = {
   series: { href: '/admin/series', label: 'Series', title: 'Series', icon: 'collections_bookmark', group: 'CONTENT' },
   chapters: { href: '/admin/chapters', label: 'Chapters', title: 'Chapters', icon: 'auto_stories', group: '' },
   upload: { href: '/admin/upload', label: 'Upload', title: 'Upload chapter', icon: 'upload', group: '' },
+  batch: { href: '/admin/batch', label: 'Batch translate', title: 'Batch translate', icon: 'dynamic_feed', group: '' },
   queue: { href: '/admin/queue', label: 'Translation queue', title: 'Translation queue', icon: 'translate', group: 'PIPELINE' },
   processing: { href: '/admin/processing', label: 'Processing', title: 'Processing', icon: 'memory', group: '' },
   users: { href: '/admin/users', label: 'Users', title: 'Users & payments', icon: 'group', group: 'PEOPLE' },
@@ -18,7 +19,7 @@ export const SECTIONS = {
   settings: { href: '/admin/settings', label: 'Settings', title: 'Settings', icon: 'settings', group: 'SYSTEM' },
   audit: { href: '/admin/audit', label: 'Audit log', title: 'Audit log', icon: 'policy', group: '' },
 } as const;
-type Key = keyof typeof SECTIONS | 'review';
+type Key = keyof typeof SECTIONS | 'review' | 'translate';
 
 function currentKey(path: string): Key {
   const seg = path.replace(/^\/admin\/?/, '').split('/')[0];
@@ -42,8 +43,8 @@ export default function AdminShell({ initials, counts: c, children }: { initials
     users: c.payments,
     reports: c.reports,
   };
-  const title = key === 'review' ? 'Translation review' : SECTIONS[key]?.title ?? 'Admin';
-  const crumb = key === 'review' ? 'PIPELINE / QUEUE' : (SECTIONS[key as keyof typeof SECTIONS]?.group || 'NERIO ADMIN');
+  const title = key === 'review' ? 'Translation review' : key === 'translate' ? 'Translation workspace' : SECTIONS[key]?.title ?? 'Admin';
+  const crumb = key === 'review' ? 'PIPELINE / QUEUE' : key === 'translate' ? 'CONTENT / BATCH TRANSLATE' : (SECTIONS[key as keyof typeof SECTIONS]?.group || 'NERIO ADMIN');
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh', fontSize: 14 }}>
@@ -57,7 +58,7 @@ export default function AdminShell({ initials, counts: c, children }: { initials
         <nav className="stack" style={{ flex: 1, overflowY: 'auto', padding: '12px 10px', gap: 2 }}>
           {(Object.keys(SECTIONS) as (keyof typeof SECTIONS)[]).map(k => {
             const s = SECTIONS[k];
-            const on = key === k || (k === 'queue' && key === 'review');
+            const on = key === k || (k === 'queue' && key === 'review') || (k === 'batch' && key === 'translate');
             const n = counts[k];
             const danger = k === 'processing' && failed > 0;
             return (

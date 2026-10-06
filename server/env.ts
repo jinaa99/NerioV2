@@ -6,6 +6,9 @@ import { z } from 'zod';
  * importing it from a Client Component fails the build (`server-only`).
  * Parsed lazily so `next build` and pages that never touch the database work without a DB configured.
  */
+const unsetIfBlank = (v: unknown) => (typeof v === 'string' && !v.trim() ? undefined : v);
+const flag = (fallback: boolean) => z.preprocess(unsetIfBlank, z.stringbool().default(fallback));
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DATABASE_URL: z.url({
@@ -17,14 +20,29 @@ const schema = z.object({
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
   CHAPTER_ZIP_MAX_BYTES: z.coerce.number().int().min(1_048_576).max(1_073_741_824).default(250 * 1024 * 1024),
   CHAPTER_IMAGE_MAX_BYTES: z.coerce.number().int().min(1_048_576).max(200 * 1024 * 1024).default(40 * 1024 * 1024),
-  CHAPTER_IMAGE_MIN_WIDTH: z.coerce.number().int().min(1).default(400),
-  CHAPTER_IMAGE_MIN_HEIGHT: z.coerce.number().int().min(1).default(500),
-  CHAPTER_IMAGE_MAX_WIDTH: z.coerce.number().int().max(50_000).default(12_000),
-  CHAPTER_IMAGE_MAX_HEIGHT: z.coerce.number().int().max(100_000).default(40_000),
-  CHAPTER_ARCHIVE_MAX_ENTRIES: z.coerce.number().int().min(1).max(2000).default(500),
+  CHAPTER_IMAGE_MIN_WIDTH: z.coerce.number().int().min(1).default(64),
+  CHAPTER_IMAGE_MIN_HEIGHT: z.coerce.number().int().min(1).default(16),
+  CHAPTER_IMAGE_MAX_WIDTH: z.coerce.number().int().max(50_000).default(20_000),
+  CHAPTER_IMAGE_MAX_HEIGHT: z.coerce.number().int().max(200_000).default(120_000),
+  CHAPTER_ARCHIVE_MAX_ENTRIES: z.coerce.number().int().min(1).max(5000).default(1500),
   CHAPTER_ARCHIVE_MAX_EXPANDED_BYTES: z.coerce.number().int().min(1_048_576).max(2_147_483_648).default(1_000_000_000),
   NERIO_STORAGE_DIR: z.string().min(1).default('./private-storage'),
-  OCR_PROVIDER: z.enum(['mock', 'openai_compatible']).default('mock'),
+  /** tesseract = local open-source OCR (default, free); openai_compatible = optional external vision model; mock = fixed fake output. */
+  OCR_PROVIDER: z.enum(['tesseract', 'mock', 'openai_compatible']).default('tesseract'),
+  /** Where tesseract.js keeps downloaded language data. Point TESSERACT_LANG_PATH at a folder of *.traineddata(.gz) to run fully offline. */
+  TESSERACT_CACHE_DIR: z.string().min(1).default('./.cache/tesseract'),
+  TESSERACT_LANG_PATH: z.preprocess(unsetIfBlank, z.string().optional()),
+  /** Words Tesseract is less sure about than this (0–100) are treated as noise on artwork. */
+  OCR_MIN_WORD_CONFIDENCE: z.coerce.number().min(0).max(100).default(50),
+  /** Chapters OCR'd at the same time in the manual workflow, and Tesseract workers per process. */
+  OCR_JOB_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
+  OCR_WORKERS: z.coerce.number().int().min(1).max(8).default(2),
+  /** Final page images rendered at the same time after manual translations are saved. */
+  FINALIZE_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
+  /** Publish manually translated chapters as soon as every page is finalized without blocking errors. */
+  AUTO_PUBLISH_TRANSLATED_CHAPTERS: flag(false),
+  /** Saved manual translations count as approved (no separate approval pass). */
+  MANUAL_TRANSLATION_AUTO_APPROVE: flag(true),
   TRANSLATION_PROVIDER: z.enum(['mock', 'openai_compatible']).default('mock'),
   AI_API_BASE_URL: z.url({ protocol: /^https$/ }).default('https://api.openai.com/v1'),
   AI_API_KEY: z.string().optional(),
@@ -32,7 +50,12 @@ const schema = z.object({
   TRANSLATION_MODEL: z.string().min(1).default('gpt-4o-mini'),
   OCR_CONFIDENCE_MIN: z.coerce.number().min(0).max(1).default(0.65),
   TRANSLATION_CONFIDENCE_MIN: z.coerce.number().min(0).max(1).default(0.65),
-  IMAGE_CLEANUP_PROVIDER: z.enum(['mock', 'http_json']).default('mock'),
+  /** Concurrent OCR/translation requests across the whole server process. */
+  AI_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(4),
+  /** Chapters translated at the same time by the in-process worker. */
+  TRANSLATION_JOB_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
+  /** local = erase lettering from detected balloon shapes; http_json = external inpainting service; mock = none. */
+  IMAGE_CLEANUP_PROVIDER: z.enum(['local', 'mock', 'http_json']).default('local'),
   IMAGE_CLEANUP_URL: z.string().optional(),
   TYPESET_MIN_FONT_SIZE: z.coerce.number().int().min(8).max(24).default(12),
   TYPESET_MAX_FONT_SIZE: z.coerce.number().int().min(12).max(72).default(36),

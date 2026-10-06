@@ -10,12 +10,14 @@ import { deleteImage, getImage, putDeliveryImage } from '@/server/storage';
 import { serverEnv } from '@/server/env';
 import { DalError, parseInput } from '@/server/errors';
 import { uuid } from '@/lib/validation';
-import { requireRole } from '@/server/auth/actor';
+import { requireRole, type Actor } from '@/server/auth/actor';
 import { recordAudit } from '@/server/data/audit';
 import { notifyFollowers } from '@/server/data/catalog';
 import { getSettings } from '@/server/data/settings';
 import { getImageCleanupProvider, getOCRProvider, getTranslationProvider, MalformedAIOutputError, type OCRRegion, type TranslationContext } from './providers';
-import { renderMongolianText } from './typesetting';
+import { renderMongolianText, type TextBox } from './typesetting';
+import { analyzeBalloon, balloonArea, rasterize, sameBalloon, toPixels, type Balloon, type PageRaster } from './bubbles';
+import { isUppercase, shouldTranslate, sourceLineCount, untranslated } from './segments';
 import { checkPublication } from './qa';
 
 function isPrivateAddress(address: string) {
@@ -30,7 +32,7 @@ function isPrivateAddress(address: string) {
   return lower === '::' || lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80:') || lower.startsWith('::ffff:127.') || lower.startsWith('::ffff:10.') || lower.startsWith('::ffff:192.168.');
 }
 
-async function loadPage(source: string): Promise<{ bytes: Buffer; mime: string }> {
+export async function loadPage(source: string): Promise<{ bytes: Buffer; mime: string }> {
   if (!source.startsWith('https://')) {
     const bytes = await getImage(source);
     if (!bytes) throw new Error('Stored page image is missing or unreadable.');
@@ -71,7 +73,7 @@ function qualityFlags(source: string, translated: string, ocrConfidence: number,
   const flags: string[] = [];
   const output = translated.trim();
   if (!output) flags.push('empty_translation');
-  if (/[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/u.test(output)) flags.push('untranslated_text');
+  if (output && untranslated(output, context.sourceLanguage, context.targetLanguage)) flags.push('untranslated_text');
   if (output.length > 0 && output.length < Math.max(2, Math.ceil(source.trim().length * 0.25))) flags.push('suspiciously_short');
   if (output.length > Math.max(40, source.trim().length * 5)) flags.push('suspiciously_long');
   if (ocrConfidence < serverEnv().OCR_CONFIDENCE_MIN) flags.push('low_ocr_confidence');
@@ -91,19 +93,62 @@ async function log(jobId: string, attempt: number, stage: ProcessingStage | 'rea
 }
 
 async function setStage(jobId: string, attempt: number, stage: ProcessingStage, progress: number) {
-  const [row] = await db().update(translationJobs).set({ stage, stageProgress: progress })
+  const [row] = await db().update(translationJobs).set({ stage, stageProgress: Math.min(100, Math.max(0, progress)) })
     .where(and(eq(translationJobs.id, jobId), eq(translationJobs.status, 'running'))).returning({ id: translationJobs.id, previousStage: translationJobs.stage });
   if (!row) throw new DalError('CONFLICT', 'This job was cancelled or changed while it was running.');
   if (row.previousStage !== stage && progress === 0) await log(jobId, attempt, stage, `Started ${stage.replaceAll('_', ' ')} stage.`);
 }
 
-/** Execute one existing queued job. Every write is keyed by job/segment ids so retries replace partial work. */
+/** Run `fn` over `items` with at most `limit` in flight, keeping result order. */
+async function pool<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length); let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const index = next++; results[index] = await fn(items[index], index); }
+  }));
+  return results;
+}
+
+type Region = OCRRegion & { lines: number };
+/** Join OCR regions that sit in the same balloon, so each balloon is translated and lettered once. */
+export function groupByBalloon(raster: PageRaster, regions: OCRRegion[]): { region: Region; balloon: Balloon }[] {
+  const groups: { region: Region; balloon: Balloon }[] = [];
+  for (const region of regions) {
+    const pixels = toPixels(region, raster.width, raster.height);
+    const owner = groups.find(group => sameBalloon(group.balloon, pixels));
+    if (!owner) { groups.push({ region: { ...region, lines: sourceLineCount(region.text) }, balloon: analyzeBalloon(raster, pixels) }); continue; }
+    const r = owner.region;
+    const x = Math.min(r.x, region.x), y = Math.min(r.y, region.y);
+    owner.region = { ...r, text: `${r.text}\n${region.text}`, x, y, w: Math.max(r.x + r.w, region.x + region.w) - x, h: Math.max(r.y + r.h, region.y + region.h) - y,
+      confidence: Math.min(r.confidence, region.confidence), kind: r.kind === 'sfx' ? region.kind : r.kind, lines: r.lines + sourceLineCount(region.text) };
+  }
+  return groups;
+}
+
+/** Characters that fit the balloon at roughly the original lettering size; sent to the translator as a length budget. */
+function capacity(balloon: Balloon, region: Region, pageWidth: number, sourceLength: number) {
+  const env = serverEnv();
+  const size = Math.max(env.TYPESET_MIN_FONT_SIZE, pageWidth * 0.022, Math.min(pageWidth * 0.075, balloon.ink.h / region.lines / env.TYPESET_LINE_HEIGHT));
+  const area = balloonArea(balloon) * (balloon.enclosed ? 0.55 : 1.1);
+  return Math.max(6, Math.round(Math.max(area / (size * 0.56 * size * env.TYPESET_LINE_HEIGHT), sourceLength * 0.9)));
+}
+
+type Segment = Region & { id: string; pageId: string; pageNumber: number; maxChars: number; uppercase: boolean; malformed?: boolean; translatedText?: string; translationConfidence?: number; qaFlags: string[] };
+const textBox = (segment: { id: string; x: number; y: number; w: number; h: number; text: string; source: string }): TextBox => ({
+  id: segment.id, x: segment.x, y: segment.y, w: segment.w, h: segment.h, text: segment.text, uppercase: isUppercase(segment.source), sourceLines: sourceLineCount(segment.source),
+});
+const VISUAL_FLAGS = ['cleanup_failed', 'cleanup_unavailable', 'missing_translation', 'missing_glyph', 'overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'delivery_storage_failed'];
+
+/** Execute one existing queued job as the signed-in editor. */
 export async function runTranslationJob(jobId: string) {
-  const actor = await requireRole('editor');
+  return runTranslationJobAs(await requireRole('editor'), jobId);
+}
+
+/** Execute one existing queued job. Every write is keyed by job/segment ids so retries replace partial work. */
+export async function runTranslationJobAs(actor: Actor, jobId: string) {
   const id = parseInput(uuid, jobId);
   const [claimed] = await db().transaction(async tx => {
     const [job] = await tx.select({ id: translationJobs.id, chapterId: translationJobs.chapterId, attempt: translationJobs.attempt }).from(translationJobs)
-      .where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'queued'))).for('update');
+      .where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'queued'), eq(translationJobs.workflow, 'ai'))).for('update');
     if (!job) throw new DalError('CONFLICT', 'Only queued translation jobs can be run.');
     await tx.update(translationJobs).set({ status: 'running', stage: 'validating', stageProgress: 0, startedAt: new Date(), finishedAt: null, errorCode: null, errorMessage: null }).where(eq(translationJobs.id, job.id));
     await tx.update(chapters).set({ status: 'processing' }).where(eq(chapters.id, job.chapterId));
@@ -116,6 +161,7 @@ export async function runTranslationJob(jobId: string) {
   const storedOutputs: string[] = [];
   let activeStage: ProcessingStage = 'validating';
   try {
+    const env = serverEnv();
     const [job] = await db().select({ id: translationJobs.id, chapterId: chapters.id, chapterNumber: chapters.number, chapterTitle: chapters.title,
       seriesId: series.id, seriesTitle: series.title, seriesDescription: series.description, sourceLanguage: translationJobs.sourceLanguage, targetLanguage: translationJobs.targetLanguage })
       .from(translationJobs).innerJoin(chapters, eq(chapters.id, translationJobs.chapterId)).innerJoin(series, eq(series.id, chapters.seriesId)).where(eq(translationJobs.id, claimed.id));
@@ -130,7 +176,7 @@ export async function runTranslationJob(jobId: string) {
     await setStage(job.id, claimed.attempt, 'processing_images', 0);
     for (const page of pages) {
       const bytes = await loadPage(page.sourceKey);
-      const [meta] = await Promise.all([sharp(bytes.bytes, { failOn: 'error' }).metadata(), sharp(bytes.bytes, { failOn: 'error' }).stats()]);
+      const meta = await sharp(bytes.bytes, { failOn: 'error', limitInputPixels: 2_000_000_000 }).metadata();
       if (!meta.width || !meta.height || meta.width !== page.width || meta.height !== page.height) throw new Error(`Page ${page.pageNumber} is corrupted or its dimensions do not match the uploaded record.`);
     }
     await log(job.id, claimed.attempt, 'processing_images', `Validated ${pages.length} page images.`);
@@ -144,105 +190,134 @@ export async function runTranslationJob(jobId: string) {
       .where(and(eq(chapters.seriesId, job.seriesId), inArray(translationSegments.reviewStatus, ['approved', 'edited']), sql`${translationSegments.translatedText} is not null`))
       .orderBy(sql`${translationSegments.updatedAt} desc`).limit(500);
     const ocrProvider = getOCRProvider(); const translationProvider = getTranslationProvider();
-    const byPage = new Map<string, (OCRRegion & { id: string; pageNumber: number; malformed?: boolean; translatedText?: string; translationConfidence?: number; qaFlags: string[] })[]>();
-    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
-      activeStage = 'ocr';
-      await setStage(job.id, claimed.attempt, 'ocr', Math.floor((pageIndex / pages.length) * 100));
-      const page = pages[pageIndex];
-      const { bytes, mime } = await loadPage(page.sourceKey);
+
+    activeStage = 'ocr';
+    await setStage(job.id, claimed.attempt, 'ocr', 0);
+    let ocrDone = 0; let skipped = 0;
+    const byPage = new Map<string, Segment[]>();
+    await pool(pages, 3, async page => {
+      const { bytes } = await loadPage(page.sourceKey);
       let regions: OCRRegion[]; let malformedOCR = false;
-      try { regions = await ocrProvider.recognize(bytes, mime); }
+      try { regions = await ocrProvider.recognize(bytes, job.sourceLanguage); }
       catch (error) {
         if (!(error instanceof MalformedAIOutputError)) throw error;
-        malformedOCR = true;
-        regions = [{ text: '', x: 0, y: 0, w: 1, h: 1, confidence: 0, kind: 'other' }];
+        malformedOCR = true; regions = [];
       }
-      const validRegions = regions.filter(region => region.text.trim().length > 0);
-      if (malformedOCR || validRegions.length === 0) {
-        malformedOCR = true;
-        validRegions.push({ text: '', x: 0, y: 0, w: 1, h: 1, confidence: 0, kind: 'other' });
-      }
-      const inserted = validRegions.length ? await db().insert(translationSegments).values(validRegions.map((region, position) => ({
+      const raster = await rasterize(bytes);
+      const groups = groupByBalloon(raster, regions.filter(region => region.text.trim()));
+      const kept = groups.filter(group => {
+        const decision = shouldTranslate(group.region.text, group.region.kind, job.sourceLanguage);
+        if (!decision.translate) skipped++;
+        return decision.translate;
+      });
+      const rows = kept.map(({ region, balloon }) => ({ region, maxChars: capacity(balloon, region, raster.width, region.text.length) }));
+      // A page whose OCR output stays malformed after retries is held for a human with a full-page placeholder.
+      if (malformedOCR) rows.push({ region: { text: '', x: 0, y: 0, w: 1, h: 1, confidence: 0, kind: 'other', lines: 1 }, maxChars: 0 });
+      const inserted = rows.length ? await db().insert(translationSegments).values(rows.map(({ region }, position) => ({
         jobId: job.id, pageId: page.id, position, kind: region.kind, x: region.x, y: region.y, w: region.w, h: region.h,
         sourceText: region.text.trim(), confidence: null, ocrConfidence: region.confidence, translationConfidence: null, processingStatus: 'ocr_complete',
       }))).returning({ id: translationSegments.id }) : [];
-      byPage.set(page.id, validRegions.map((region, i) => ({ ...region, id: inserted[i].id, pageNumber: page.pageNumber, malformed: malformedOCR && i === validRegions.length - 1, qaFlags: [] })));
-    }
-    const all = [...byPage.entries()].flatMap(([pageId, regions]) => regions.map(region => ({ pageId, ...region })));
-    await log(job.id, claimed.attempt, 'ocr', `OCR detected ${all.filter(item => item.text.trim()).length} text regions across ${pages.length} pages.`);
-    let processed = 0;
+      byPage.set(page.id, rows.map(({ region, maxChars }, i) => ({ ...region, id: inserted[i].id, pageId: page.id, pageNumber: page.pageNumber, maxChars,
+        uppercase: isUppercase(region.text), malformed: malformedOCR && i === rows.length - 1, qaFlags: [] })));
+      await setStage(job.id, claimed.attempt, 'ocr', Math.floor((++ocrDone / pages.length) * 100));
+    });
+    const all = pages.flatMap(page => byPage.get(page.id) ?? []);
+    await log(job.id, claimed.attempt, 'ocr', `OCR found ${all.length} text regions to translate across ${pages.length} pages; left ${skipped} sound effects, single words and watermarks untouched.`);
+
+    activeStage = 'translating';
+    await setStage(job.id, claimed.attempt, 'translating', 0);
     const previousTranslations: { source: string; translation: string }[] = [];
-    for (const item of all) {
-      activeStage = 'translating';
-      await setStage(job.id, claimed.attempt, 'translating', Math.floor((processed / Math.max(all.length, 1)) * 100));
-      const samePage = byPage.get(item.pageId) ?? [];
-      const idx = samePage.findIndex(segment => segment.id === item.id);
-      const nearbyDialogue = samePage.slice(Math.max(0, idx - 3), idx).concat(samePage.slice(idx + 1, idx + 4)).map(segment => segment.text);
-      const sourceWords = item.text.toLocaleLowerCase().match(/[가-힣]{2,}/g) ?? [];
+    const contextFor = (pageIndex: number, sources: string[]): TranslationContext => {
+      const keywords = sources.flatMap(text => text.toLocaleLowerCase().match(/\p{L}{4,}/gu) ?? []);
       const relevantMemory = translationMemory.flatMap(entry => {
         if (!entry.translation) return [];
         const source = entry.source.toLocaleLowerCase();
-        const overlap = source === item.text.toLocaleLowerCase() || sourceWords.some(word => source.includes(word));
-        return overlap ? [{ source: entry.source.slice(0, 1000), translation: entry.translation.slice(0, 1500) }] : [];
-      }).slice(0, 20);
-      const context: TranslationContext = {
-        targetLanguage: job.targetLanguage,
-        currentPage: { pageNumber: item.pageNumber, detectedDialogue: samePage.slice(0, 80).map(segment => segment.text.slice(0, 400)) },
-        chapter: { number: job.chapterNumber, title: job.chapterTitle, pageNumber: item.pageNumber },
-        series: { title: job.seriesTitle, description: job.seriesDescription, sourceLanguage: job.sourceLanguage },
-        nearbyDialogue, characterNames: characterRows, glossary, previousTranslations: previousTranslations.slice(-30),
+        return sources.some(text => text.toLocaleLowerCase() === source) || keywords.some(word => source.includes(word)) ? [{ source: entry.source.slice(0, 1000), translation: entry.translation.slice(0, 1500) }] : [];
+      }).slice(0, 30);
+      return {
+        sourceLanguage: job.sourceLanguage, targetLanguage: job.targetLanguage,
+        chapter: { number: job.chapterNumber, title: job.chapterTitle, pageNumber: pageIndex + 1, pageCount: pages.length },
+        series: { title: job.seriesTitle, description: job.seriesDescription.slice(0, 1500) },
+        characterNames: characterRows, glossary, previousTranslations: previousTranslations.slice(-40),
+        upcomingDialogue: (byPage.get(pages[pageIndex + 1]?.id) ?? []).slice(0, 12).map(segment => segment.text.slice(0, 300)),
         translationMemory: relevantMemory,
       };
-      let translatedText = ''; let translationConfidence = 0; let malformed = !!item.malformed;
-      try {
-        if (item.malformed) throw new MalformedAIOutputError('OCR provider returned malformed structured output.');
-        const result = await translationProvider.translate(item.text, context);
-        translatedText = result.text; translationConfidence = result.confidence;
-      } catch (error) {
-        if (error instanceof MalformedAIOutputError) malformed = true;
-        else throw new Error(error instanceof Error && error.message.includes('AI_API_KEY') ? error.message : 'Translation provider request failed. Check provider settings and try again.');
+    };
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      const segments = (byPage.get(pages[pageIndex].id) ?? []);
+      const translatable = segments.filter(segment => !segment.malformed);
+      const context = contextFor(pageIndex, translatable.map(segment => segment.text));
+      let results = new Map<string, { text: string; confidence: number }>(); let malformedPage = false;
+      if (translatable.length) {
+        try {
+          const output = await translationProvider.translatePage(translatable.map((segment, i) => ({ id: String(i + 1), text: segment.text, kind: segment.kind, maxChars: segment.maxChars })), context);
+          results = new Map(output.map(item => [translatable[Number(item.id) - 1]?.id ?? '', item]));
+        } catch (error) {
+          if (error instanceof MalformedAIOutputError) malformedPage = true;
+          else throw new Error(error instanceof Error && error.message.includes('AI_API_KEY') ? error.message : 'Translation provider request failed. Check provider settings and try again.');
+        }
       }
-      const qaFlags = qualityFlags(item.text, translatedText, item.confidence, translationConfidence, context);
-      if (malformed) qaFlags.push('malformed_output', 'ocr_critical_failure');
-      if (serverEnv().OCR_PROVIDER === 'mock' || serverEnv().TRANSLATION_PROVIDER === 'mock') qaFlags.push('mock_provider_output');
-      const uniqueFlags = [...new Set(qaFlags)];
-      item.qaFlags = uniqueFlags;
-      await db().update(translationSegments).set({ translatedText, confidence: translationConfidence, translationConfidence,
-        processingStatus: uniqueFlags.length ? 'needs_review' : 'complete', qaFlags: uniqueFlags, warning: uniqueFlags.length ? uniqueFlags.join(', ') : null,
-        reviewStatus: uniqueFlags.length ? 'flagged' : 'pending' }).where(eq(translationSegments.id, item.id));
-      item.translatedText = translatedText;
-      previousTranslations.push({ source: item.text, translation: translatedText });
-      processed++;
+      for (const segment of segments) {
+        const result = results.get(segment.id);
+        const translatedText = result?.text.trim() ?? ''; const translationConfidence = result?.confidence ?? 0;
+        const qaFlags = qualityFlags(segment.text, translatedText, segment.confidence, translationConfidence, context);
+        if (segment.malformed) qaFlags.push('malformed_output', 'ocr_critical_failure');
+        else if (malformedPage) qaFlags.push('malformed_output');
+        if (env.OCR_PROVIDER === 'mock' || env.TRANSLATION_PROVIDER === 'mock') qaFlags.push('mock_provider_output');
+        segment.qaFlags = [...new Set(qaFlags)];
+        segment.translatedText = translatedText; segment.translationConfidence = translationConfidence;
+        await db().update(translationSegments).set({ translatedText, confidence: translationConfidence, translationConfidence,
+          processingStatus: segment.qaFlags.length ? 'needs_review' : 'complete', qaFlags: segment.qaFlags, warning: segment.qaFlags.length ? segment.qaFlags.join(', ') : null,
+          reviewStatus: segment.qaFlags.length ? 'flagged' : 'pending' }).where(eq(translationSegments.id, segment.id));
+        if (translatedText) previousTranslations.push({ source: segment.text, translation: translatedText });
+      }
+      await setStage(job.id, claimed.attempt, 'translating', Math.floor(((pageIndex + 1) / pages.length) * 100));
     }
-    await log(job.id, claimed.attempt, 'translating', `Processed ${processed} text regions.`);
+    await log(job.id, claimed.attempt, 'translating', `Translated ${all.length} text regions page by page with chapter context.`);
+
     const settings = await getSettings();
     const cleanupProvider = getImageCleanupProvider();
     const pageQA: { id: string; flags: string[]; outputKey: string | null; outputBytes: number | null }[] = [];
-    const criticalVisualFlags = new Set(['cleanup_failed', 'cleanup_unavailable', 'missing_translation', 'missing_glyph', 'overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'delivery_storage_failed']);
+    const criticalVisualFlags = new Set(VISUAL_FLAGS);
+    let shortened = 0;
     for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
       const page = pages[pageIndex];
-      const pageSegments = all.filter(segment => segment.pageId === page.id);
-      const boxes = pageSegments.map(segment => ({ id: segment.id, x: segment.x, y: segment.y, w: segment.w, h: segment.h, text: segment.translatedText ?? '' }));
+      const pageSegments = byPage.get(page.id) ?? [];
       activeStage = 'cleaning';
       await setStage(job.id, claimed.attempt, 'cleaning', Math.floor((pageIndex / pages.length) * 100));
       const master = await loadPage(page.sourceKey);
-      let cleanedImage = master.bytes;
-      let inpainted = false;
+      let cleaned: Buffer | null = null;
       const pageFlags = new Set<string>();
-      if (boxes.length) {
+      if (pageSegments.length && cleanupProvider) {
         try {
-          const cleaned = await cleanupProvider.clean(master.bytes, master.mime, boxes.map(({ x, y, w, h }) => ({ x, y, w, h })));
-          const [before, after] = await Promise.all([sharp(master.bytes).metadata(), sharp(cleaned.image, { failOn: 'error' }).metadata()]);
-          if (before.width !== after.width || before.height !== after.height) throw new Error('Image cleanup changed page dimensions.');
-          cleanedImage = cleaned.image; inpainted = cleaned.inpainted;
-          if (!inpainted) pageFlags.add('cleanup_unavailable');
+          const result = await cleanupProvider.clean(master.bytes, master.mime, pageSegments.map(({ x, y, w, h }) => ({ x, y, w, h })));
+          if (result.inpainted) cleaned = result.image; else pageFlags.add('cleanup_unavailable');
         } catch {
           pageFlags.add('cleanup_failed');
         }
       }
       activeStage = 'typesetting';
       await setStage(job.id, claimed.attempt, 'typesetting', Math.floor((pageIndex / pages.length) * 100));
-      const typeset = await renderMongolianText(cleanedImage, boxes, inpainted, settings.typesetFont);
+      const boxes = () => pageSegments.map(segment => textBox({ ...segment, text: segment.translatedText ?? '', source: segment.text }));
+      let typeset = await renderMongolianText(master.bytes, boxes(), { font: settings.typesetFont, cleaned });
+      // Lines that overflow their balloon get one concise re-translation before a human has to step in.
+      const overflowing = pageSegments.filter(segment => segment.translatedText && typeset.flags.get(segment.id)?.some(flag => flag === 'overflow' || flag === 'unreadably_small_text'));
+      if (overflowing.length) {
+        try {
+          const context = contextFor(pageIndex, overflowing.map(segment => segment.text));
+          const output = await translationProvider.shorten(overflowing.map((segment, i) => ({ id: String(i + 1), source: segment.text,
+            translation: segment.translatedText!, maxChars: Math.max(4, Math.min(segment.maxChars, Math.round(segment.translatedText!.length * 0.7))) })), context);
+          for (const item of output) {
+            const segment = overflowing[Number(item.id) - 1];
+            if (!segment || !item.text.trim()) continue;
+            segment.translatedText = item.text.trim(); shortened++;
+            await db().update(translationSegments).set({ translatedText: segment.translatedText }).where(eq(translationSegments.id, segment.id));
+          }
+          typeset = await renderMongolianText(master.bytes, boxes(), { font: settings.typesetFont, cleaned });
+        } catch (error) {
+          if (!(error instanceof MalformedAIOutputError) && !(error instanceof Error && /AI provider/.test(error.message))) throw error;
+        }
+      }
       for (const visualFlag of typeset.pageFlags) pageFlags.add(visualFlag);
       for (const [segmentId, segmentFlags] of typeset.flags) if (segmentFlags.length) {
         const segment = pageSegments.find(item => item.id === segmentId);
@@ -261,11 +336,13 @@ export async function runTranslationJob(jobId: string) {
       pageQA.push({ id: page.id, flags: dbVisualFlags, outputKey, outputBytes });
       for (const segment of pageSegments) {
         const flags = [...new Set([...segment.qaFlags, ...pageFlags])];
+        segment.qaFlags = flags;
         await db().update(translationSegments).set({ qaFlags: flags, warning: flags.length ? flags.join(', ') : null,
           processingStatus: flags.length ? 'needs_review' : 'complete', reviewStatus: flags.length ? 'flagged' : 'pending' }).where(eq(translationSegments.id, segment.id));
       }
       await db().update(chapterPages).set({ outputKey, outputBytes, visualQaFlags: dbVisualFlags }).where(eq(chapterPages.id, page.id));
     }
+    if (shortened) await log(job.id, claimed.attempt, 'typesetting', `Shortened ${shortened} translations to fit their balloons.`);
     activeStage = 'qa';
     await setStage(job.id, claimed.attempt, 'qa', 0);
     const allSegmentFlags = all.flatMap(segment => segment.qaFlags);
@@ -286,7 +363,7 @@ export async function runTranslationJob(jobId: string) {
         await tx.update(chapters).set({ status: 'in_review' }).where(eq(chapters.id, claimed.chapterId));
       }
       await tx.update(translationJobs).set({ status: 'ready', stage: canAutoPublish ? 'published' : 'ready', stageProgress: 100, finishedAt: new Date(),
-        options: sql`jsonb_set(${translationJobs.options}, '{providers}', ${JSON.stringify({ ocr: serverEnv().OCR_PROVIDER, translation: serverEnv().TRANSLATION_PROVIDER, cleanup: serverEnv().IMAGE_CLEANUP_PROVIDER, typesetting: `opentype-${settings.typesetFont}` })}::jsonb, true)` })
+        options: sql`jsonb_set(${translationJobs.options}, '{providers}', ${JSON.stringify({ ocr: env.OCR_PROVIDER, ocrModel: env.OCR_MODEL, translation: env.TRANSLATION_PROVIDER, translationModel: env.TRANSLATION_MODEL, cleanup: env.IMAGE_CLEANUP_PROVIDER, typesetting: `opentype-${settings.typesetFont}` })}::jsonb, true)` })
         .where(and(eq(translationJobs.id, job.id), eq(translationJobs.status, 'running')));
       const qaFlagCount = pageQA.reduce((total, page) => total + page.flags.length, 0);
       await tx.insert(translationJobLogs).values({ jobId: job.id, attempt: claimed.attempt, stage: 'qa', message: canAutoPublish ? 'Critical QA passed; chapter auto-published.' : 'QA finished; chapter held for human review.', details: { criticalFlags, flags: qaFlagCount, autoPublished: canAutoPublish } });
@@ -297,7 +374,7 @@ export async function runTranslationJob(jobId: string) {
       } else {
         await tx.insert(translationJobLogs).values({ jobId: job.id, attempt: claimed.attempt, stage: 'ready', message: 'Chapter is waiting for admin review.' });
       }
-      await recordAudit(tx, actor, { action: canAutoPublish ? 'translation_job.auto_publish' : 'translation_job.complete', targetType: 'translation_job', targetId: job.id, metadata: { chapterId: job.chapterId, segments: all.length, visualFlags: qaFlagCount, autoPublished: canAutoPublish, criticalFlags, providers: [serverEnv().OCR_PROVIDER, serverEnv().TRANSLATION_PROVIDER, serverEnv().IMAGE_CLEANUP_PROVIDER] } });
+      await recordAudit(tx, actor, { action: canAutoPublish ? 'translation_job.auto_publish' : 'translation_job.complete', targetType: 'translation_job', targetId: job.id, metadata: { chapterId: job.chapterId, segments: all.length, visualFlags: qaFlagCount, autoPublished: canAutoPublish, criticalFlags, providers: [env.OCR_PROVIDER, env.TRANSLATION_PROVIDER, env.IMAGE_CLEANUP_PROVIDER] } });
     });
     return { id: job.id, segments: all.length, status: 'ready' as const, autoPublished: canAutoPublish };
   } catch (error) {
@@ -325,20 +402,25 @@ export async function rerenderReviewedPage(jobId: string, pageId: string): Promi
     .where(and(eq(chapterPages.id, pageId), eq(translationJobs.id, jobId), eq(translationJobs.status, 'ready')));
   if (!page) throw new DalError('NOT_FOUND', 'Review page is no longer available.');
   const segments = await db().select({ id: translationSegments.id, x: translationSegments.x, y: translationSegments.y, w: translationSegments.w, h: translationSegments.h,
-    text: translationSegments.translatedText, qaFlags: translationSegments.qaFlags, status: translationSegments.reviewStatus })
+    text: translationSegments.translatedText, source: translationSegments.sourceText, qaFlags: translationSegments.qaFlags, status: translationSegments.reviewStatus })
     .from(translationSegments).where(and(eq(translationSegments.jobId, jobId), eq(translationSegments.pageId, pageId))).orderBy(asc(translationSegments.position));
-  const visualFlags = new Set(['cleanup_failed', 'cleanup_unavailable', 'missing_translation', 'missing_glyph', 'overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'delivery_storage_failed']);
+  const visualFlags = new Set(VISUAL_FLAGS);
   const flags = new Set<string>();
   const oldOutputKey = page.outputKey;
+  let rendered: Awaited<ReturnType<typeof renderMongolianText>> | null = null;
   try {
-    if (!segments.length || segments.some(segment => !segment.text?.trim())) flags.add('missing_translation');
+    if (segments.some(segment => !segment.text?.trim())) flags.add('missing_translation');
     const master = await loadPage(page.sourceKey);
-    const cleaned = await getImageCleanupProvider().clean(master.bytes, master.mime, segments.map(({ x, y, w, h }) => ({ x, y, w, h })));
-    const [originalMeta, cleanedMeta] = await Promise.all([sharp(master.bytes).metadata(), sharp(cleaned.image, { failOn: 'error' }).metadata()]);
-    if (originalMeta.width !== cleanedMeta.width || originalMeta.height !== cleanedMeta.height || originalMeta.width !== page.width || originalMeta.height !== page.height) throw new Error('Page dimensions changed during cleanup.');
-    if (!cleaned.inpainted) flags.add('cleanup_unavailable');
+    const meta = await sharp(master.bytes, { limitInputPixels: 2_000_000_000 }).metadata();
+    if (meta.width !== page.width || meta.height !== page.height) throw new Error('Page dimensions changed during cleanup.');
+    const cleanupProvider = getImageCleanupProvider();
+    let cleaned: Buffer | null = null;
+    if (cleanupProvider && segments.length) {
+      const result = await cleanupProvider.clean(master.bytes, master.mime, segments.map(({ x, y, w, h }) => ({ x, y, w, h })));
+      if (result.inpainted) cleaned = result.image; else flags.add('cleanup_unavailable');
+    }
     const settings = await getSettings();
-    const rendered = await renderMongolianText(cleaned.image, segments.map(segment => ({ id: segment.id, x: segment.x, y: segment.y, w: segment.w, h: segment.h, text: segment.text ?? '' })), cleaned.inpainted, settings.typesetFont);
+    rendered = await renderMongolianText(master.bytes, segments.map(segment => textBox({ ...segment, text: segment.text ?? '' })), { font: settings.typesetFont, cleaned });
     rendered.pageFlags.forEach(flag => flags.add(flag));
     if (flags.size === 0) {
       const key = `chapters/${page.chapterId}/delivery-${page.attempt}-${String(page.pageNumber).padStart(4, '0')}-${randomInt(1000, 9999)}.png`;

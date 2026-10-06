@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useState, useTransition } from 'react';
+import { useEffect, useState, useTransition } from 'react';
 import Pager from '@/components/Pager';
 import { Button, Icon, Segmented } from '@/components/ui';
 import { chapterNo, coverBg, timeAgo } from '@/lib/catalog';
@@ -21,16 +21,39 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
   const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState<string | null>(null);
 
+  const live = counts.running > 0 || data.items.some(j => j.status === 'running');
+  // Jobs run in the background on the server; keep the list fresh while anything is moving.
+  useEffect(() => {
+    if (!live) return;
+    const timer = setInterval(() => router.refresh(), 4000);
+    return () => clearInterval(timer);
+  }, [live, router]);
+
+  const runAll = () => {
+    setBusy('all');
+    startTransition(async () => {
+      try {
+        const response = await fetch('/api/admin/pipeline/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const result = await response.json();
+        setBusy(null);
+        if (!response.ok) return toast(result.error ?? 'Could not start the queue.', 'error', 'var(--danger)');
+        toast(result.started ? `Translating ${result.started} chapter${result.started === 1 ? '' : 's'} in the background` : 'No queued jobs to start', 'play_arrow', 'var(--info)');
+        router.refresh();
+      } catch {
+        setBusy(null);
+        toast('Could not reach the processing service. Try again.', 'error', 'var(--danger)');
+      }
+    });
+  };
+
   const act = (j: JobDTO, kind: 'run' | 'retry' | 'cancel') => {
     setBusy(j.id);
     startTransition(async () => {
       let res: { ok: boolean; error?: string };
-      let autoPublished = false;
       try {
         if (kind === 'run') {
           const response = await fetch(`/api/admin/pipeline/${j.id}/run`, { method: 'POST' });
           const data = await response.json();
-          autoPublished = response.ok && data.autoPublished === true;
           res = response.ok ? { ok: true } : { ok: false, error: data.error ?? 'Translation job failed.' };
         } else res = await (kind === 'retry' ? retryJobAction(j.id) : cancelJobAction(j.id));
       } catch {
@@ -39,7 +62,7 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
       }
       setBusy(null);
       if (!res.ok) return toast(res.error ?? 'Pipeline action failed.', 'error', 'var(--danger)');
-      toast(kind === 'run' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} ${autoPublished ? 'published after QA' : 'sent for review'}` : kind === 'retry' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} queued again` : 'Job cancelled', kind === 'cancel' ? 'block' : 'refresh', 'var(--info)');
+      toast(kind === 'run' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} is translating in the background` : kind === 'retry' ? `${j.series.title} · Ch. ${chapterNo(j.chapter.number)} queued again` : 'Job cancelled', kind === 'cancel' ? 'block' : 'refresh', 'var(--info)');
       router.refresh();
     });
   };
@@ -65,6 +88,7 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
           <Segmented h={30} options={FILTERS} value={filter} onChange={v => startTransition(() => router.replace(v === 'all' ? path : `${path}?filter=${v}`))} />
         </div>
         <span className="meta" style={{ marginLeft: 'auto' }}>{data.total} JOB{data.total === 1 ? '' : 'S'}</span>
+        {counts.queued > 0 && <Button variant="primary" h={30} px={12} icon="play_arrow" disabled={paused} loading={busy === 'all'} onClick={runAll}>Run all queued ({counts.queued})</Button>}
       </div>
 
       {data.items.length === 0 && (
@@ -94,7 +118,8 @@ export default function Processing({ data, filter, counts, paused }: { data: { i
                 {(isFailed || j.status === 'cancelled') && <Button variant="secondary" h={32} px={12} icon="refresh" loading={busy === j.id} onClick={() => act(j, 'retry')}>Retry</Button>}
                 {j.status === 'queued' && <Button variant="primary" h={32} px={12} icon="play_arrow" disabled={paused} loading={busy === j.id} onClick={() => act(j, 'run')}>Run pipeline</Button>}
                 {(j.status === 'running' || j.status === 'queued') && <Button variant="ghost" h={32} loading={busy === j.id} onClick={() => { if (confirm('Cancel this job? The chapter returns to draft.')) act(j, 'cancel'); }}>Cancel</Button>}
-                {j.status === 'ready' && j.chapter.status === 'in_review' && <Link href={`/admin/review/${j.id}`} className="btn btn-secondary" style={{ '--h': '32px', '--px': '12px', '--fs': '13px' } as React.CSSProperties}>Review</Link>}
+                {j.workflow === 'manual' && <Link href={`/admin/translate/${j.chapter.id}`} className="btn btn-secondary" style={{ '--h': '32px', '--px': '12px', '--fs': '13px' } as React.CSSProperties}>Workspace</Link>}
+                {j.workflow === 'ai' && j.status === 'ready' && j.chapter.status === 'in_review' && <Link href={`/admin/review/${j.id}`} className="btn btn-secondary" style={{ '--h': '32px', '--px': '12px', '--fs': '13px' } as React.CSSProperties}>Review</Link>}
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(11,minmax(0,1fr))', gap: 4 }}>
                 {PIPELINE_STAGE_ORDER.map((name, i) => {

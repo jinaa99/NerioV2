@@ -54,3 +54,7 @@
 .dropzone:hover { border-color: rgba(255, 255, 255, .3); }
 .dropzone.drag { border-color: var(--ember); background: rgba(232, 130, 95, .06); }
 .read-bar:hover { background: var(--ink-1) !important; }
+@media (max-width: 960px) {
+  .translate-grid { grid-template-columns: minmax(0, 1fr) !important; }
+  .translate-grid > :first-child { position: static !important; }
+}

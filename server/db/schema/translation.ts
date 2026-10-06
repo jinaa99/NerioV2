@@ -25,6 +25,8 @@ export const translationJobs = pgTable('translation_jobs', {
   /** Non-secret run parameters (model ids, thresholds). */
   options: jsonb().$type<Record<string, unknown>>().notNull().default({}),
   requestedBy: uuid().references(() => users.id, { onDelete: 'set null' }),
+  /** `ai`: OCR → machine translation → QA. `manual`: OCR only; a human translates every segment in the workspace. */
+  workflow: varchar({ length: 16 }).notNull().default('ai'),
   startedAt: tstz(),
   finishedAt: tstz(),
   ...timestamps(),
@@ -35,6 +37,8 @@ export const translationJobs = pgTable('translation_jobs', {
   index('translation_jobs_status_idx').on(t.status, t.updatedAt.desc()),
   check('translation_jobs_progress_range', sql`${t.stageProgress} between 0 and 100`),
   check('translation_jobs_attempt_positive', sql`${t.attempt} > 0`),
+  check('translation_jobs_workflow', sql`${t.workflow} in ('ai', 'manual')`),
+  index('translation_jobs_workflow_idx').on(t.workflow, t.createdAt.desc()),
 ]);
 
 /** Append-only operational events for inspecting and retrying chapter processing. */
@@ -65,7 +69,19 @@ export const translationSegments = pgTable('translation_segments', {
   w: real().notNull(),
   h: real().notNull(),
   sourceText: text().notNull(),
+  /** Admin correction of the OCR text; when set it is the source shown to the translator. */
+  correctedSourceText: text(),
+  /** BCP-47 language the OCR engine read the region as. */
+  detectedLanguage: varchar({ length: 16 }),
+  /** `ocr` = detected automatically, `manual` = drawn by an admin. */
+  origin: varchar({ length: 8 }).notNull().default('ocr'),
   translatedText: text(),
+  /** Manual workflow: pending → draft (autosaved) → translated (saved) → approved. */
+  translationStatus: varchar({ length: 16 }).notNull().default('pending'),
+  /** Manual workflow: whether the saved translation is lettered into the page's final image. */
+  typesetStatus: varchar({ length: 16 }).notNull().default('pending'),
+  /** Per-segment overrides of the typesetting style (see lib/typeset-style.ts). */
+  style: jsonb().$type<Record<string, unknown>>().notNull().default({}),
   processingStatus: varchar({ length: 24 }).notNull().default('pending'),
   ocrConfidence: real(),
   translationConfidence: real(),
@@ -84,5 +100,8 @@ export const translationSegments = pgTable('translation_segments', {
   check('translation_segments_box', sql`${t.x} between 0 and 1 and ${t.y} between 0 and 1 and ${t.w} > 0 and ${t.w} <= 1 and ${t.h} > 0 and ${t.h} <= 1`),
   check('translation_segments_confidence_range', sql`${t.confidence} is null or ${t.confidence} between 0 and 1`),
   check('translation_segments_ocr_confidence_range', sql`${t.ocrConfidence} is null or ${t.ocrConfidence} between 0 and 1`),
+  check('translation_segments_translation_status', sql`${t.translationStatus} in ('pending', 'draft', 'translated', 'approved', 'failed')`),
+  check('translation_segments_typeset_status', sql`${t.typesetStatus} in ('pending', 'rendered', 'needs_review', 'accepted', 'failed')`),
+  check('translation_segments_origin', sql`${t.origin} in ('ocr', 'manual')`),
   check('translation_segments_translation_confidence_range', sql`${t.translationConfidence} is null or ${t.translationConfidence} between 0 and 1`),
 ]);

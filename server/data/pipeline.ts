@@ -26,7 +26,7 @@ type Paged<T> = { items: T[]; total: number; limit: number; offset: number };
 /* Jobs */
 
 export type JobDTO = {
-  id: string; status: JobStatus; stage: PipelineStage; stageProgress: number; attempt: number; priority: number;
+  id: string; status: JobStatus; stage: PipelineStage; workflow: 'ai' | 'manual'; stageProgress: number; attempt: number; priority: number;
   errorCode: string | null; errorMessage: string | null; sourceLanguage: string; targetLanguage: string;
   createdAt: Date; startedAt: Date | null; finishedAt: Date | null;
   logs: { stage: PipelineStage; level: string; message: string; createdAt: Date }[];
@@ -51,7 +51,7 @@ export async function listJobs(input: Pagination & { filter?: JobFilter } = {}):
   const where = filterWhere[q.filter];
   const [rows, [{ total }]] = await Promise.all([
     db().select({
-      id: translationJobs.id, status: translationJobs.status, stage: translationJobs.stage, stageProgress: translationJobs.stageProgress,
+      id: translationJobs.id, status: translationJobs.status, stage: translationJobs.stage, stageProgress: translationJobs.stageProgress, workflow: translationJobs.workflow,
       attempt: translationJobs.attempt, priority: translationJobs.priority, errorCode: translationJobs.errorCode, errorMessage: translationJobs.errorMessage,
       sourceLanguage: translationJobs.sourceLanguage, targetLanguage: translationJobs.targetLanguage,
       createdAt: translationJobs.createdAt, startedAt: translationJobs.startedAt, finishedAt: translationJobs.finishedAt,
@@ -71,7 +71,7 @@ export async function listJobs(input: Pagination & { filter?: JobFilter } = {}):
     .from(translationJobLogs).where(inArray(translationJobLogs.jobId, rows.map(row => row.id))).orderBy(desc(translationJobLogs.createdAt)).limit(500) : [];
   return {
     items: rows.map(r => ({
-      id: r.id, status: r.status, stage: r.stage, stageProgress: r.stageProgress, attempt: r.attempt, priority: r.priority,
+      id: r.id, status: r.status, stage: r.stage, stageProgress: r.stageProgress, workflow: r.workflow === 'manual' ? 'manual' : 'ai', attempt: r.attempt, priority: r.priority,
       errorCode: r.errorCode, errorMessage: r.errorMessage, sourceLanguage: r.sourceLanguage, targetLanguage: r.targetLanguage,
       createdAt: r.createdAt, startedAt: r.startedAt, finishedAt: r.finishedAt,
       logs: logRows.filter(logRow => logRow.jobId === r.id).slice(0, 6).reverse(),
@@ -172,7 +172,8 @@ export type ReviewQueueItemDTO = {
 export async function listReviewQueue(input: Pagination = {}): Promise<Paged<ReviewQueueItemDTO>> {
   await requireRole('translator');
   const q = parseInput(pagination, input);
-  const where = and(eq(chapters.status, 'in_review'), eq(translationJobs.status, 'ready'), isNull(series.deletedAt));
+  // Manually translated chapters are worked on in the translation workspace, not the AI review queue.
+  const where = and(eq(chapters.status, 'in_review'), eq(translationJobs.status, 'ready'), eq(translationJobs.workflow, 'ai'), isNull(series.deletedAt));
   const seg = (expr: SQL) => sql`(select ${expr} from ${translationSegments} s where s.job_id = ${outer(translationJobs.id)})`;
   const [rows, [{ total }]] = await Promise.all([
     db().select({
@@ -260,7 +261,7 @@ export async function reviewSegment(input: ReviewSegmentInput) {
   if (data.reviewStatus === 'edited' && /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/u.test(data.translatedText ?? '')) throw new DalError('INVALID_INPUT', 'Corrected text must not contain untranslated Korean.', { translatedText: ['Translate all Korean text'] });
   const [current] = await db().select({ qaFlags: translationSegments.qaFlags }).from(translationSegments).where(and(
     eq(translationSegments.id, data.segmentId),
-    sql`exists (select 1 from ${translationJobs} j join ${chapters} c on c.id = j.chapter_id where j.id = ${translationSegments.jobId} and j.status = 'ready' and c.status = 'in_review')`,
+    sql`exists (select 1 from ${translationJobs} j join ${chapters} c on c.id = j.chapter_id where j.id = ${translationSegments.jobId} and j.status = 'ready' and j.workflow = 'ai' and c.status = 'in_review')`,
   ));
   const correctedFlags = data.reviewStatus === 'edited'
     ? (current?.qaFlags ?? []).filter(flag => ['overflow', 'clipping', 'outside_region', 'overlapping_text', 'unreadably_small_text', 'cleanup_failed', 'cleanup_unavailable', 'delivery_storage_failed'].includes(flag))
@@ -269,7 +270,7 @@ export async function reviewSegment(input: ReviewSegmentInput) {
     .set({ reviewStatus: data.reviewStatus, ...(correctedFlags ? { qaFlags: correctedFlags, warning: correctedFlags.join(', ') || null } : {}), ...(data.translatedText !== undefined ? { translatedText: data.translatedText } : {}), reviewedBy: actor.userId, reviewedAt: new Date() })
     .where(and(
       eq(translationSegments.id, data.segmentId),
-      sql`exists (select 1 from ${translationJobs} j join ${chapters} c on c.id = j.chapter_id where j.id = ${translationSegments.jobId} and j.status = 'ready' and c.status = 'in_review')`,
+      sql`exists (select 1 from ${translationJobs} j join ${chapters} c on c.id = j.chapter_id where j.id = ${translationSegments.jobId} and j.status = 'ready' and j.workflow = 'ai' and c.status = 'in_review')`,
     ))
     .returning({ id: translationSegments.id, jobId: translationSegments.jobId, pageId: translationSegments.pageId, reviewStatus: translationSegments.reviewStatus });
   if (!row) throw new DalError('CONFLICT', 'This segment is no longer under review.');
@@ -287,7 +288,7 @@ export async function approvePage(jobId: string, pageNumber: number) {
     .where(and(
       eq(translationSegments.jobId, id),
       eq(translationSegments.reviewStatus, 'pending'),
-      sql`${translationSegments.pageId} in (select p.id from ${chapterPages} p join ${translationJobs} j on j.chapter_id = p.chapter_id join ${chapters} c on c.id = j.chapter_id where j.id = ${id} and p.page_number = ${n} and j.status = 'ready' and c.status = 'in_review')`,
+      sql`${translationSegments.pageId} in (select p.id from ${chapterPages} p join ${translationJobs} j on j.chapter_id = p.chapter_id join ${chapters} c on c.id = j.chapter_id where j.id = ${id} and p.page_number = ${n} and j.status = 'ready' and j.workflow = 'ai' and c.status = 'in_review')`,
     ))
     .returning({ id: translationSegments.id });
   return { approved: rows.length };
@@ -300,7 +301,7 @@ export async function sendBack(jobId: string, note: string) {
   const reason = parseInput(z.string().trim().max(500), note);
   return db().transaction(async tx => {
     const [job] = await tx.update(translationJobs).set({ status: 'queued', stage: 'queued', stageProgress: 0, attempt: sql`${translationJobs.attempt} + 1`, finishedAt: null, startedAt: null })
-      .where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'ready'), eq(translationJobs.stage, 'ready'),
+      .where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'ready'), eq(translationJobs.stage, 'ready'), eq(translationJobs.workflow, 'ai'),
         sql`exists (select 1 from ${chapters} c where c.id = ${translationJobs.chapterId} and c.status = 'in_review')`)).returning({ chapterId: translationJobs.chapterId });
     if (!job) throw new DalError('CONFLICT', 'Only chapters waiting for review can be sent back.');
     await tx.update(chapters).set({ status: 'processing' }).where(and(eq(chapters.id, job.chapterId), eq(chapters.status, 'in_review')));
@@ -316,7 +317,7 @@ export async function publishReviewed(jobId: string) {
   const actor = await requireRole('editor');
   const id = parseInput(uuid, jobId);
   return db().transaction(async tx => {
-    const [job] = await tx.select({ chapterId: translationJobs.chapterId }).from(translationJobs).where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'ready'), eq(translationJobs.stage, 'ready'))).for('update');
+    const [job] = await tx.select({ chapterId: translationJobs.chapterId }).from(translationJobs).where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'ready'), eq(translationJobs.stage, 'ready'), eq(translationJobs.workflow, 'ai'))).for('update');
     if (!job) throw new DalError('NOT_FOUND', 'Review not found.');
     const [{ open }] = await tx.select({ open: count() }).from(translationSegments)
       .where(and(eq(translationSegments.jobId, id), inArray(translationSegments.reviewStatus, ['pending', 'flagged'])));

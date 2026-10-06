@@ -51,24 +51,32 @@ test('rejects a non-ZIP file, invalid archive and traversal paths', async () => 
   await assert.rejects(inspect(Buffer.from('nope'), 'chapter.zip', 'application/zip'), /valid ZIP signature/);
   await assert.rejects(inspect(zip([['../page1.png', await img({ r: 0, g: 0, b: 0 })]]), 'chapter.zip', 'application/zip'), /unsafe file path/);
   await assert.rejects(inspect(zip([['page1.png', Buffer.from('broken')]]), 'chapter.zip', 'application/zip'), /readable image/);
-  await assert.rejects(inspect(zip([['page1.gif', await img({ r: 0, g: 0, b: 0 })]]), 'chapter.zip', 'application/zip'), /Unsupported file/);
+  await assert.rejects(inspect(zip([['page1.exe', await img({ r: 0, g: 0, b: 0 })]]), 'chapter.zip', 'application/zip'), /Unsupported file/);
 });
 
-test('rejects ambiguous ordering and duplicate image content', async () => {
+test('extension downloads: junk files skipped, unnumbered and repeated pages kept, any page size accepted', async () => {
   const inspect = await load(); const one = await img({ r: 0, g: 0, b: 0 });
-  await assert.rejects(inspect(zip([['front.png', one]]), 'chapter.zip', 'application/zip'), /Cannot determine page order/);
-  await assert.rejects(inspect(zip([['page1.png', one], ['page2.png', one]]), 'chapter.zip', 'application/zip'), /duplicates another page/);
+  const tall = await sharp({ create: { width: 690, height: 16000, channels: 3, background: '#fff' } }).jpeg().toBuffer();
+  const narrow = await sharp({ create: { width: 300, height: 600, channels: 4, background: { r: 9, g: 9, b: 9, alpha: 0.5 } } }).webp().toBuffer();
+  const pages = await inspect(zip([
+    ['Chapter 5/__MACOSX/._01.jpg', Buffer.from('junk')], ['Chapter 5/.DS_Store', Buffer.from('junk')], ['Chapter 5/ComicInfo.xml', Buffer.from('<x/>')],
+    ['Chapter 5/02.jpg', tall], ['Chapter 5/01.png', one], ['Chapter 5/03.png', one], ['Chapter 5/10.webp', narrow],
+  ]), 'chapter.zip', 'application/zip');
+  assert.deepEqual(pages.map(p => p.filename.split('/').at(-1)), ['01.png', '02.jpg', '03.png', '10.webp']);
+  assert.deepEqual([pages[1].width, pages[1].height], [690, 16000]);
+  const cover = await inspect(zip([['front.png', one]]), 'chapter.cbz', 'application/zip');
+  assert.equal(cover.length, 1);
 });
 
 test('rejects unsupported extension and forged claimed MIME type', async () => {
   const inspect = await load(); const data = zip([['page1.png', await img({ r: 1, g: 1, b: 1 })]]);
-  await assert.rejects(inspect(data, 'chapter.rar', 'application/zip'), /\.zip extension/);
+  await assert.rejects(inspect(data, 'chapter.rar', 'application/zip'), /\.zip or \.cbz extension/);
   await assert.rejects(inspect(data, 'chapter.zip', 'text/plain'), /file type must be ZIP/);
 });
 
 test('rejects oversized ZIP input and undersized page dimensions', async () => {
   const inspect = await load(); const data = zip([['page1.png', await img({ r: 1, g: 1, b: 1 })]]);
   await assert.rejects(inspect(Buffer.concat([data, Buffer.alloc(1_048_577)]), 'chapter.zip', 'application/zip'), /size limit/);
-  const small = await sharp({ create: { width: 300, height: 600, channels: 3, background: '#fff' } }).png().toBuffer();
-  await assert.rejects(inspect(zip([['page1.png', small]]), 'chapter.zip', 'application/zip'), /smaller than the minimum/);
+  const spacer = await sharp({ create: { width: 40, height: 8, channels: 3, background: '#fff' } }).png().toBuffer();
+  await assert.rejects(inspect(zip([['page1.png', spacer]]), 'chapter.zip', 'application/zip'), /no page images large enough/);
 });

@@ -1,5 +1,5 @@
 import 'server-only';
-import { mkdir, writeFile, unlink, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, unlink, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { serverEnv } from './env';
 
@@ -53,6 +53,12 @@ export async function deleteImage(key: string): Promise<void> {
 export async function getImage(key: string): Promise<Buffer | null> {
   if (!isChapterImageKey(key) && !isSeriesCoverKey(key)) return null;
   return readFile(path.resolve(serverEnv().NERIO_STORAGE_DIR, key)).catch(() => null);
+}
+
+/** True when a stored chapter image exists (used to verify final images before a chapter is published). */
+export async function imageExists(key: string): Promise<boolean> {
+  if (!isChapterImageKey(key)) return false;
+  return stat(path.resolve(serverEnv().NERIO_STORAGE_DIR, key)).then(info => info.isFile() && info.size > 0, () => false);
 }
 
 export function isChapterImageKey(key: string): boolean {

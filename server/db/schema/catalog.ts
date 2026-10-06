@@ -107,6 +107,15 @@ export const chapterPages = pgTable('chapter_pages', {
   outputKey: text(),
   outputBytes: integer(),
   visualQaFlags: jsonb().$type<string[]>().notNull().default([]),
+  /** Manual workflow: OCR state of this page (pending | done | failed), so OCR retries resume per page. */
+  ocrStatus: varchar({ length: 16 }).notNull().default('pending'),
+  ocrError: varchar({ length: 500 }),
+  /** Bumped whenever saved text, boxes or styles on the page change; the final image is current when renderedVersion catches up. */
+  editVersion: integer().notNull().default(0),
+  renderedVersion: integer().notNull().default(0),
+  /** Final-image render state: idle | queued | rendering | failed. */
+  renderStatus: varchar({ length: 16 }).notNull().default('idle'),
+  renderError: varchar({ length: 500 }),
   originalFilename: varchar({ length: 512 }),
   contentHash: varchar({ length: 64 }),
   width: integer().notNull(),
@@ -117,6 +126,8 @@ export const chapterPages = pgTable('chapter_pages', {
   uniqueIndex('chapter_pages_chapter_page_uq').on(t.chapterId, t.pageNumber),
   check('chapter_pages_page_positive', sql`${t.pageNumber} > 0`),
   check('chapter_pages_dimensions', sql`${t.width} > 0 and ${t.height} > 0`),
+  check('chapter_pages_ocr_status', sql`${t.ocrStatus} in ('pending', 'done', 'failed')`),
+  check('chapter_pages_render_status', sql`${t.renderStatus} in ('idle', 'queued', 'rendering', 'failed')`),
 ]);
 
 /** Per-series translation glossary (e.g. 빚 → "the Debt"). */

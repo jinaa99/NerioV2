@@ -566,6 +566,13 @@ export async function createChapter(input: CreateChapterInput) {
   }
 }
 
+/** Chapters in the manual translation workflow can only go live once every page is translated and finalized. */
+async function assertManualPublishable(tx: Executor, chapterId: string) {
+  const { manualPublishBlocker } = await import('../ai/finalize');
+  const blocker = await manualPublishBlocker(tx, chapterId);
+  if (blocker) throw new DalError('CONFLICT', blocker);
+}
+
 const PIPELINE_BUSY: ChapterStatus[] = ['processing', 'in_review', 'failed'];
 
 export async function updateChapter(chapterId: string, input: UpdateChapterInput) {
@@ -579,6 +586,7 @@ export async function updateChapter(chapterId: string, input: UpdateChapterInput
       if (data.status === 'published' && PIPELINE_BUSY.includes(current.status)) {
         throw new DalError('CONFLICT', 'This chapter is still in the processing pipeline and can’t be published yet.');
       }
+      if (data.status === 'published' && current.status !== 'published') await assertManualPublishable(tx, id);
       // A "draft" save on a pipeline chapter keeps its pipeline state.
       const status = data.status === 'draft' && current.status !== 'published' && current.status !== 'draft' ? current.status : data.status;
       const publishedAt = publishDate(data.status, data.publishedAt);
@@ -608,6 +616,7 @@ export async function setChapterPublished(chapterId: string, published: boolean)
     const [current] = await tx.select({ status: chapters.status, publishedAt: chapters.publishedAt }).from(chapters).where(eq(chapters.id, id)).for('update');
     if (!current) throw new DalError('NOT_FOUND', 'Chapter not found.');
     if (published && PIPELINE_BUSY.includes(current.status)) throw new DalError('CONFLICT', 'This chapter is still in the processing pipeline.');
+    if (published && current.status !== 'published') await assertManualPublishable(tx, id);
     if (!published && current.status !== 'published') return { id };
     const publishedAt = published ? current.publishedAt ?? new Date() : current.publishedAt;
     const [row] = await tx.update(chapters).set({ status: published ? 'published' : 'draft', publishedAt })
@@ -622,6 +631,7 @@ export async function setChapterPublished(chapterId: string, published: boolean)
 export async function publishChapter(chapterId: string) {
   const actor = await requireRole('editor');
   return db().transaction(async tx => {
+    await assertManualPublishable(tx, parseInput(uuid, chapterId));
     const [ch] = await tx
       .update(chapters)
       .set({ status: 'published', publishedAt: new Date() })
