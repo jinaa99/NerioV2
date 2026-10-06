@@ -21,3 +21,15 @@ test('state-changing API origins must be present and match the request host/orig
   assert.equal(originMatchesUrl('https://nerio.mn', 'https://nerio.mn/api/upload'), true);
   assert.equal(originMatchesUrl('http://nerio.mn', 'https://nerio.mn/api/upload'), false);
 });
+
+test('early-access chapters stay locked for readers without Premium until their free date', async () => {
+  const { chapterLocked } = await import('./data/catalog');
+  const future = new Date(Date.now() + 86_400_000);
+  const past = new Date(Date.now() - 86_400_000);
+  assert.equal(chapterLocked({ access: 'early_access', freeAt: future }, false, false), true);
+  assert.equal(chapterLocked({ access: 'early_access', freeAt: null }, false, false), true);
+  assert.equal(chapterLocked({ access: 'early_access', freeAt: future }, true, false), false);
+  assert.equal(chapterLocked({ access: 'early_access', freeAt: future }, false, true), false);
+  assert.equal(chapterLocked({ access: 'early_access', freeAt: past }, false, false), false);
+  assert.equal(chapterLocked({ access: 'free', freeAt: null }, false, false), false);
+});

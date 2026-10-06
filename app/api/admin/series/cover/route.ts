@@ -5,7 +5,7 @@ import { requireRole } from '@/server/auth/actor';
 import { db } from '@/server/db/client';
 import { series } from '@/server/db/schema';
 import { recordAudit } from '@/server/data/audit';
-import { deleteImage, putSeriesCover } from '@/server/storage';
+import { deleteImage, isSeriesCoverKey, putSeriesCover } from '@/server/storage';
 import { originMatchesUrl } from '@/server/security/origin';
 
 export const runtime = 'nodejs';
@@ -44,14 +44,22 @@ export async function POST(request: Request) {
   const key = `series/${seriesId || randomUUID()}/covers/${randomUUID()}.webp`;
   try { await putSeriesCover(key, output); } catch { return error('Cover image storage failed. Try again.', 503); }
   if (seriesId) {
+    let previous: string | null;
     try {
-      await db().transaction(async tx => {
+      previous = await db().transaction(async tx => {
+        const [current] = await tx.select({ coverKey: series.coverKey }).from(series).where(eq(series.id, seriesId)).for('update');
         await tx.update(series).set({ coverKey: key }).where(eq(series.id, seriesId));
         await recordAudit(tx, actor, { action: 'series.cover_upload', targetType: 'series', targetId: seriesId, metadata: { bytes: output.length, format: 'webp' } });
+        return current?.coverKey ?? null;
       });
     } catch {
       await deleteImage(key);
       return error('The cover could not be attached to the series. Try again.', 500);
+    }
+    // Remove the replaced upload once nothing references it; URL covers aren't ours to delete.
+    if (previous && isSeriesCoverKey(previous)) {
+      const [stillUsed] = await db().select({ id: series.id }).from(series).where(eq(series.coverKey, previous)).limit(1);
+      if (!stillUsed) await deleteImage(previous);
     }
   }
   return Response.json({ coverUrl: `/api/media/${key}`, uploadKey: key });

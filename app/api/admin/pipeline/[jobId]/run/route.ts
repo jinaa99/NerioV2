@@ -17,7 +17,7 @@ export async function POST(request: Request, context: { params: Promise<{ jobId:
     return Response.json(result);
   } catch (error) {
     if (error instanceof DalError) {
-      const status = error.code === 'UNAUTHENTICATED' ? 401 : error.code === 'FORBIDDEN' ? 403 : error.code === 'NOT_FOUND' ? 404 : 409;
+      const status = error.code === 'UNAUTHENTICATED' ? 401 : error.code === 'FORBIDDEN' ? 403 : error.code === 'NOT_FOUND' ? 404 : error.code === 'INVALID_INPUT' ? 400 : 409;
       return Response.json({ error: error.message }, { status });
     }
     return Response.json({ error: 'Translation job failed. Check the job details and provider configuration.' }, { status: 500 });

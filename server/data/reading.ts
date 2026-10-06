@@ -1,22 +1,29 @@
 import 'server-only';
 import { and, count, desc, eq, isNull, lte, sql } from 'drizzle-orm';
 import { pagination, saveProgressInput, type Pagination, type SaveProgressInput } from '@/lib/validation';
-import { requireActor } from '../auth/actor';
+import { hasRole, requireActor } from '../auth/actor';
 import { db } from '../db/client';
 import { outer } from '../db/sql';
 import { chapters, readingHistory, readingProgress, series } from '../db/schema';
 import { DalError, parseInput } from '../errors';
 import { imageSrc } from '../storage';
+import { chapterLocked, isPremium } from './catalog';
 
 /** Record the reader's position. Upserts both the per-series progress and the per-chapter history row. */
 export async function saveProgress(input: SaveProgressInput) {
   const actor = await requireActor();
   const data = parseInput(saveProgressInput, input);
   const [ch] = await db()
-    .select({ seriesId: chapters.seriesId, pageCount: chapters.pageCount })
+    .select({ seriesId: chapters.seriesId, pageCount: chapters.pageCount, access: chapters.access, freeAt: chapters.freeAt })
     .from(chapters)
-    .where(and(eq(chapters.id, data.chapterId), eq(chapters.status, 'published'), lte(chapters.publishedAt, sql`now()`)));
+    .innerJoin(series, eq(series.id, chapters.seriesId))
+    .where(and(
+      eq(chapters.id, data.chapterId), eq(chapters.status, 'published'), lte(chapters.publishedAt, sql`now()`),
+      isNull(series.deletedAt), sql`${series.status} <> 'draft'`,
+    ));
   if (!ch) throw new DalError('NOT_FOUND', 'Chapter not found.');
+  // Early-access chapters the reader can't open must not land in their progress or history.
+  if (chapterLocked(ch, false, hasRole(actor, 'editor')) && !(await isPremium(actor))) throw new DalError('FORBIDDEN', 'This chapter is in early access.');
   if (data.pageNumber > ch.pageCount) throw new DalError('INVALID_INPUT', 'Page number is outside this chapter.');
 
   const now = new Date();

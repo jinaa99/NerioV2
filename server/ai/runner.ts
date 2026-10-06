@@ -8,7 +8,8 @@ import { db } from '@/server/db/client';
 import { chapterPages, chapters, characters, glossaryTerms, series, translationJobLogs, translationJobs, translationSegments } from '@/server/db/schema';
 import { deleteImage, getImage, putDeliveryImage } from '@/server/storage';
 import { serverEnv } from '@/server/env';
-import { DalError } from '@/server/errors';
+import { DalError, parseInput } from '@/server/errors';
+import { uuid } from '@/lib/validation';
 import { requireRole } from '@/server/auth/actor';
 import { recordAudit } from '@/server/data/audit';
 import { notifyFollowers } from '@/server/data/catalog';
@@ -99,9 +100,10 @@ async function setStage(jobId: string, attempt: number, stage: ProcessingStage, 
 /** Execute one existing queued job. Every write is keyed by job/segment ids so retries replace partial work. */
 export async function runTranslationJob(jobId: string) {
   const actor = await requireRole('editor');
+  const id = parseInput(uuid, jobId);
   const [claimed] = await db().transaction(async tx => {
     const [job] = await tx.select({ id: translationJobs.id, chapterId: translationJobs.chapterId, attempt: translationJobs.attempt }).from(translationJobs)
-      .where(and(eq(translationJobs.id, jobId), eq(translationJobs.status, 'queued'))).for('update');
+      .where(and(eq(translationJobs.id, id), eq(translationJobs.status, 'queued'))).for('update');
     if (!job) throw new DalError('CONFLICT', 'Only queued translation jobs can be run.');
     await tx.update(translationJobs).set({ status: 'running', stage: 'validating', stageProgress: 0, startedAt: new Date(), finishedAt: null, errorCode: null, errorMessage: null }).where(eq(translationJobs.id, job.id));
     await tx.update(chapters).set({ status: 'processing' }).where(eq(chapters.id, job.chapterId));

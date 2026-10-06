@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
     return new Response(null, { status: 204 });
   } catch (err) {
     if (err instanceof DalError) {
-      const status = err.code === 'UNAUTHENTICATED' ? 401 : err.code === 'NOT_FOUND' ? 404 : 400;
+      const status = err.code === 'UNAUTHENTICATED' ? 401 : err.code === 'FORBIDDEN' ? 403 : err.code === 'NOT_FOUND' ? 404 : 400;
       return Response.json({ error: err.message }, { status });
     }
     throw err;

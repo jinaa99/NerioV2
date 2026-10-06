@@ -14,7 +14,7 @@ import {
   chapterPages, chapters, follows, genres, notifications, profiles, readingProgress, series, seriesGenres, seriesTags, tags, translationJobLogs, translationJobs,
 } from '../db/schema';
 import { DalError, parseInput, rethrowUnique } from '../errors';
-import { getImage, imageSrc, isSeriesCoverKey } from '../storage';
+import { deleteImage, getImage, imageSrc, isSeriesCoverKey } from '../storage';
 import { recordAudit } from './audit';
 import { getSettings } from './settings';
 
@@ -87,14 +87,14 @@ type CardRow = { [K in keyof typeof cardColumns]: unknown } & {
   id: string; coverKey: string | null; chapterCount: number; firstChapter: number | null; latestChapter: number | null;
 };
 
-async function isPremium(actor: Actor | null): Promise<boolean> {
+export async function isPremium(actor: Actor | null): Promise<boolean> {
   if (!actor) return false;
   const [row] = await db().select({ until: profiles.premiumUntil }).from(profiles).where(eq(profiles.userId, actor.userId));
   return !!row?.until && row.until > new Date();
 }
 
 const isEarly = (c: { access: string; freeAt: Date | null }) => c.access === 'early_access' && (!c.freeAt || c.freeAt > new Date());
-const chapterLocked = (c: { access: string; freeAt: Date | null }, premium: boolean, staff: boolean) => !staff && !premium && isEarly(c);
+export const chapterLocked =(c: { access: string; freeAt: Date | null }, premium: boolean, staff: boolean) => !staff && !premium && isEarly(c);
 
 async function labelsFor(kind: 'genres' | 'tags', ids: string[]): Promise<Map<string, LabelDTO[]>> {
   const map = new Map<string, LabelDTO[]>();
@@ -637,13 +637,21 @@ export async function publishChapter(chapterId: string) {
 export async function deleteChapter(chapterId: string) {
   const actor = await requireRole('editor');
   const id = parseInput(uuid, chapterId);
-  return db().transaction(async tx => {
+  const { row, keys } = await db().transaction(async tx => {
+    const files = await tx.select({ sourceKey: chapterPages.sourceKey, outputKey: chapterPages.outputKey }).from(chapterPages).where(eq(chapterPages.chapterId, id));
     const [row] = await tx.delete(chapters).where(eq(chapters.id, id)).returning({ seriesId: chapters.seriesId, number: chapters.number });
     if (!row) throw new DalError('NOT_FOUND', 'Chapter not found.');
     await recordAudit(tx, actor, { action: 'chapter.delete', targetType: 'chapter', targetId: id, metadata: row });
-    return row;
+    return { row, keys: storedKeys(files) };
   });
+  // Only after the rows are gone, so a failed delete never leaves pages pointing at missing files.
+  await Promise.all(keys.map(deleteImage));
+  return row;
 }
+
+/** Object-storage keys of page images; `https://` pages live elsewhere and are left alone. */
+const storedKeys = (pages: { sourceKey: string; outputKey: string | null }[]) =>
+  pages.flatMap(p => [p.sourceKey, p.outputKey]).filter((k): k is string => !!k && !k.startsWith('https://'));
 
 /* Staff writes: pages */
 
@@ -706,17 +714,20 @@ export async function reorderPages(input: ReorderPagesInput) {
 export async function deletePage(pageId: string) {
   const actor = await requireRole('editor');
   const id = parseInput(uuid, pageId);
-  return db().transaction(async tx => {
+  const { chapterId, keys } = await db().transaction(async tx => {
     const [page] = await tx.select({ chapterId: chapterPages.chapterId }).from(chapterPages).where(eq(chapterPages.id, id));
     if (!page) throw new DalError('NOT_FOUND', 'Page not found.');
     await lockChapter(tx, page.chapterId);
-    await tx.delete(chapterPages).where(eq(chapterPages.id, id));
+    const [removed] = await tx.delete(chapterPages).where(eq(chapterPages.id, id)).returning({ sourceKey: chapterPages.sourceKey, outputKey: chapterPages.outputKey });
+    if (!removed) throw new DalError('NOT_FOUND', 'Page not found.');
     const rest = await tx.select({ id: chapterPages.id }).from(chapterPages).where(eq(chapterPages.chapterId, page.chapterId)).orderBy(asc(chapterPages.pageNumber));
     await renumber(tx, page.chapterId, rest.map(p => p.id));
     await syncPageCount(tx, page.chapterId);
     await recordAudit(tx, actor, { action: 'chapter.pages.delete', targetType: 'chapter', targetId: page.chapterId, metadata: { pageId: id } });
-    return { chapterId: page.chapterId };
+    return { chapterId: page.chapterId, keys: storedKeys([removed]) };
   });
+  await Promise.all(keys.map(deleteImage));
+  return { chapterId };
 }
 
 /* Upload: chapter + pages (+ processing job) in one transaction */
