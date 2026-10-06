@@ -70,9 +70,10 @@ function seriesFromForm(fd: FormData) {
 
 export async function createSeriesAction(_prev: FormState, fd: FormData): Promise<FormState> {
   const { values, input } = seriesFromForm(fd);
+  const coverStorageKey = str(fd, 'coverUploadKey').trim() || null;
   let id: string;
   try {
-    id = (await createSeries(input)).id;
+    id = (await createSeries(input, coverStorageKey)).id;
   } catch (err) {
     return toState(err, values);
   }

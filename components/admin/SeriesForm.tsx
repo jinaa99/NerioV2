@@ -20,7 +20,7 @@ const EMPTY: Values = { title: '', slug: '', altTitles: '', description: '', aut
 
 const fromDTO = (s: AdminSeriesDTO): Values => ({
   title: s.title, slug: s.slug, altTitles: s.altTitles.join('\n'), description: s.description, author: s.author, artist: s.artist ?? '',
-  status: s.status, sourceLanguage: s.sourceLanguage, coverUrl: s.coverUrl ?? '', coverHue: s.coverHue, genres: s.genres, tags: s.tags.join(', '),
+  status: s.status, sourceLanguage: s.sourceLanguage, coverUrl: s.coverUrl?.startsWith('https://') ? s.coverUrl : '', coverHue: s.coverHue, genres: s.genres, tags: s.tags.join(', '),
 });
 
 export default function SeriesForm({ series, allGenres, allTags, justSaved }: { series?: AdminSeriesDTO; allGenres: string[]; allTags: string[]; justSaved?: boolean }) {
@@ -29,10 +29,13 @@ export default function SeriesForm({ series, allGenres, allTags, justSaved }: { 
   const action = editing ? updateSeriesAction.bind(null, series.id) : createSeriesAction;
   const [state, formAction, pending] = useActionState<FormState, FormData>(action, {});
   const [v, setV] = useState<Values>(series ? fromDTO(series) : EMPTY);
+  const [storedCoverPreview, setStoredCoverPreview] = useState(series?.coverUrl?.startsWith('/api/media/') ? series.coverUrl : '');
+  const [coverUploadKey, setCoverUploadKey] = useState('');
   const [slugTouched, setSlugTouched] = useState(editing);
   const [newGenre, setNewGenre] = useState('');
   const [deleting, startDelete] = useTransition();
   const [, startSave] = useTransition();
+  const [coverUploading, setCoverUploading] = useState(false);
   const set = <K extends keyof Values>(k: K, val: Values[K]) => setV(prev => ({ ...prev, [k]: val }));
 
   const shown = useRef(false);
@@ -59,7 +62,23 @@ export default function SeriesForm({ series, allGenres, allTags, justSaved }: { 
     });
   };
   const err = (name: string) => fieldError(state, name);
-  const coverPreviewUrl = /^https:\/\/\S+$/.test(v.coverUrl) ? v.coverUrl.replace(/["\\]/g, encodeURIComponent) : null;
+  const coverPreviewUrl = v.coverUrl ? (/^https:\/\/\S+$/.test(v.coverUrl) ? v.coverUrl.replace(/["\\]/g, encodeURIComponent) : null) : storedCoverPreview || null;
+  const uploadCover = async (file?: File) => {
+    if (!file) return;
+    setCoverUploading(true);
+    try {
+      const form = new FormData(); if (series) form.set('seriesId', series.id); form.set('file', file);
+      const response = await fetch('/api/admin/series/cover', { method: 'POST', body: form });
+      const result = await response.json() as { coverUrl?: string; uploadKey?: string; error?: string };
+      if (!response.ok || !result.coverUrl) throw new Error(result.error || 'Cover upload failed.');
+      set('coverUrl', '');
+      setStoredCoverPreview(result.coverUrl!);
+      setCoverUploadKey(result.uploadKey ?? '');
+      toast('Cover uploaded');
+    } catch (cause) {
+      toast(cause instanceof Error ? cause.message : 'Cover upload failed.', 'error', 'var(--danger)');
+    } finally { setCoverUploading(false); }
+  };
 
   return (
     // onSubmit instead of `action`: React resets forms after an action, which would fight the controlled fields.
@@ -71,7 +90,7 @@ export default function SeriesForm({ series, allGenres, allTags, justSaved }: { 
           {series.status !== 'draft' && <Link href={`/series/${series.slug}`} className="btn btn-ghost" style={{ '--h': '36px', '--fs': '13px', gap: 6 } as React.CSSProperties} target="_blank"><Icon name="open_in_new" size={16} />View on site</Link>}
           <Link href={`/admin/chapters?series=${series.id}`} className="btn btn-outline" style={{ '--h': '36px', '--fs': '13px', gap: 6, borderColor: 'rgba(255,255,255,.1)' } as React.CSSProperties}><Icon name="auto_stories" size={16} />Chapters</Link>
         </>}
-        <Button type="submit" variant="primary" h={36} fs={13} loading={pending} icon="check">{editing ? 'Save changes' : 'Create series'}</Button>
+        <Button type="submit" variant="primary" h={36} fs={13} loading={pending || coverUploading} disabled={coverUploading} icon="check">{editing ? 'Save changes' : 'Create series'}</Button>
       </div>
       <FormError message={state.error} />
 
@@ -143,7 +162,12 @@ export default function SeriesForm({ series, allGenres, allTags, justSaved }: { 
               <Cover bg={coverBg(v.coverHue, coverPreviewUrl)} width={120} radius={12} tag={coverPreviewUrl ? undefined : 'GENERATED'} style={{ flex: 'none', outline: '1px solid rgba(255,255,255,.1)' }} />
               <div className="stack grow" style={{ gap: 16, minWidth: 200 }}>
                 <Field label="Cover image URL" htmlFor="coverUrl" error={err('coverUrl')} hint="https:// link to a 3:4 image. Empty uses the generated cover.">
-                  <input id="coverUrl" name="coverUrl" type="url" inputMode="url" className={`input ${err('coverUrl') ? 'invalid' : ''}`} style={inputStyle} placeholder="https://" value={v.coverUrl} onChange={e => set('coverUrl', e.target.value.trim())} />
+                  <input id="coverUrl" name="coverUrl" type="url" inputMode="url" className={`input ${err('coverUrl') ? 'invalid' : ''}`} style={inputStyle} placeholder="https://" value={v.coverUrl} onChange={e => { set('coverUrl', e.target.value.trim()); setStoredCoverPreview(''); setCoverUploadKey(''); }} />
+                </Field>
+                <Field label="Or upload an image" htmlFor="coverFile" hint="JPEG, PNG, or WebP · up to 10 MB. Saved as an optimized WebP.">
+                  <input id="coverFile" type="file" accept="image/jpeg,image/png,image/webp" className="input" style={inputStyle} disabled={coverUploading} onChange={e => { void uploadCover(e.currentTarget.files?.[0]); e.currentTarget.value = ''; }} />
+                  {coverUploading && <span style={{ color: 'var(--ink-3)', fontSize: 12 }}>Uploading cover…</span>}
+                  {!editing && <input type="hidden" name="coverUploadKey" value={coverUploadKey} />}
                 </Field>
                 <Field label={`Accent hue · ${v.coverHue}°`} htmlFor="coverHue" error={err('coverHue')} hint="Used for the generated cover and page backdrops.">
                   <input id="coverHue" name="coverHue" type="range" min={0} max={360} value={v.coverHue} onChange={e => set('coverHue', +e.target.value)} style={{ accentColor: `oklch(.65 .12 ${v.coverHue})` }} />

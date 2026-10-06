@@ -21,24 +21,8 @@ export async function POST(request: Request) {
   if (!originMatchesUrl(request.headers.get('origin'), request.url)) return jsonError('Upload origin is not allowed.', 403, 'invalid_origin');
   const length = Number(request.headers.get('content-length') ?? 0);
   if (length > serverEnv().CHAPTER_ZIP_MAX_BYTES + 1_000_000) return jsonError('ZIP file exceeds the upload size limit.', 413, 'zip_too_large');
-  if (!request.body) return jsonError('Upload body is missing.', 400, 'invalid_upload');
-  const reader = request.body.getReader();
-  const bodyChunks: Uint8Array[] = [];
-  let bodyLength = 0;
-  try {
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      bodyLength += chunk.value.byteLength;
-      if (bodyLength > serverEnv().CHAPTER_ZIP_MAX_BYTES + 1_000_000) {
-        await reader.cancel();
-        return jsonError('ZIP file exceeds the upload size limit.', 413, 'zip_too_large');
-      }
-      bodyChunks.push(chunk.value);
-    }
-  } catch { return jsonError('Could not read the upload body.', 400, 'invalid_upload'); }
   let form: FormData;
-  try { form = await new Response(Buffer.concat(bodyChunks.map(chunk => Buffer.from(chunk))), { headers: request.headers }).formData(); }
+  try { form = await request.formData(); }
   catch { return jsonError('Could not read the upload. Send a multipart form with a ZIP file.', 400, 'invalid_upload'); }
   const file = form.get('file');
   const seriesId = String(form.get('seriesId') ?? '');

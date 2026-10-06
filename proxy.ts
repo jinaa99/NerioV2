@@ -29,5 +29,8 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.[a-zA-Z0-9]+$).*)'],
+  // The chapter ZIP upload is excluded: Proxy buffers request bodies and cuts them off at 10MB
+  // (`proxyClientMaxBodySize`), which truncates large multipart uploads. The route checks the
+  // session, role and Origin itself.
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|api/admin/chapters/ingest|.*\\.[a-zA-Z0-9]+$).*)'],
 };

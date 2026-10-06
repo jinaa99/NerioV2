@@ -14,7 +14,7 @@ import {
   chapterPages, chapters, follows, genres, notifications, profiles, readingProgress, series, seriesGenres, seriesTags, tags, translationJobLogs, translationJobs,
 } from '../db/schema';
 import { DalError, parseInput, rethrowUnique } from '../errors';
-import { imageSrc } from '../storage';
+import { getImage, imageSrc, isSeriesCoverKey } from '../storage';
 import { recordAudit } from './audit';
 import { getSettings } from './settings';
 
@@ -365,7 +365,7 @@ export async function adminGetSeries(seriesId: string): Promise<AdminSeriesDTO |
   if (!row) return null;
   const [g, t] = await Promise.all([labelsFor('genres', [row.id]), labelsFor('tags', [row.id])]);
   const { coverKey, ...rest } = row;
-  return { ...rest, coverUrl: coverKey?.startsWith('https://') ? coverKey : null, genres: (g.get(row.id) ?? []).map(x => x.name), tags: (t.get(row.id) ?? []).map(x => x.name) };
+  return { ...rest, coverUrl: imageSrc(coverKey), genres: (g.get(row.id) ?? []).map(x => x.name), tags: (t.get(row.id) ?? []).map(x => x.name) };
 }
 
 export async function adminListTagNames() {
@@ -465,14 +465,17 @@ async function setSeriesLabels(tx: Executor, seriesId: string, genreNames: strin
   if (tagIds.length) await tx.insert(seriesTags).values(tagIds.map((tagId, position) => ({ seriesId, tagId, position })));
 }
 
-export async function createSeries(input: CreateSeriesInput) {
+export async function createSeries(input: CreateSeriesInput, coverStorageKey?: string | null) {
   const actor = await requireRole('editor');
   const { genres: genreNames, tags: tagNames, coverUrl, ...data } = parseInput(createSeriesInput, input);
+  if (coverStorageKey && (!isSeriesCoverKey(coverStorageKey) || !await getImage(coverStorageKey))) {
+    throw new DalError('INVALID_INPUT', 'Upload the cover image again before creating the series.');
+  }
   try {
     return await db().transaction(async tx => {
       const [row] = await tx.insert(series).values({
         ...data,
-        coverKey: coverUrl ?? null,
+        coverKey: coverUrl ?? coverStorageKey ?? null,
         createdBy: actor.userId,
         publishedAt: data.status === 'draft' ? null : new Date(),
       }).returning({ id: series.id, slug: series.slug });
