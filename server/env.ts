@@ -27,8 +27,9 @@ const schema = z.object({
   CHAPTER_ARCHIVE_MAX_ENTRIES: z.coerce.number().int().min(1).max(5000).default(1500),
   CHAPTER_ARCHIVE_MAX_EXPANDED_BYTES: z.coerce.number().int().min(1_048_576).max(2_147_483_648).default(1_000_000_000),
   NERIO_STORAGE_DIR: z.string().min(1).default('./private-storage'),
-  /** tesseract = local open-source OCR (default, free); openai_compatible = optional external vision model; mock = fixed fake output. */
-  OCR_PROVIDER: z.enum(['tesseract', 'mock', 'openai_compatible']).default('tesseract'),
+  /** tesseract = local open-source OCR (default, free); openai_compatible = optional external vision model; mock = fixed fake output;
+   *  none = skip OCR, pages open empty and every region is drawn by hand. */
+  OCR_PROVIDER: z.enum(['tesseract', 'mock', 'openai_compatible', 'none']).default('tesseract'),
   /** Where tesseract.js keeps downloaded language data. Point TESSERACT_LANG_PATH at a folder of *.traineddata(.gz) to run fully offline. */
   TESSERACT_CACHE_DIR: z.string().min(1).default('./.cache/tesseract'),
   TESSERACT_LANG_PATH: z.preprocess(unsetIfBlank, z.string().optional()),
@@ -48,6 +49,8 @@ const schema = z.object({
   AI_API_KEY: z.string().optional(),
   OCR_MODEL: z.string().min(1).default('gpt-4o-mini'),
   TRANSLATION_MODEL: z.string().min(1).default('gpt-4o-mini'),
+  /** Sent as `reasoning_effort` when set; Gemini maps it to thinking_level ("minimal" keeps thinking tokens near zero). */
+  AI_REASONING_EFFORT: z.preprocess(unsetIfBlank, z.enum(['none', 'minimal', 'low', 'medium', 'high']).optional()),
   OCR_CONFIDENCE_MIN: z.coerce.number().min(0).max(1).default(0.65),
   TRANSLATION_CONFIDENCE_MIN: z.coerce.number().min(0).max(1).default(0.65),
   /** Concurrent OCR/translation requests across the whole server process. */

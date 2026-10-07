@@ -27,8 +27,8 @@ const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 export async function ocrPage(job: JobRow, page: PageRow, provider: OCRProvider = getOCRProvider()): Promise<number | null> {
   const { bytes } = await loadPage(page.sourceKey);
   const regions = (await provider.recognize(bytes, job.sourceLanguage)).filter(region => region.text.trim() && !isWatermark(region.text));
-  const raster = await rasterize(bytes);
-  const merged = groupByBalloon(raster, regions).map(group => group.region);
+  // Decoding a tall strip is the slow part; a page with nothing found (or OCR_PROVIDER=none) doesn't need it.
+  const merged = regions.length ? groupByBalloon(await rasterize(bytes), regions).map(group => group.region) : [];
   const ordered = readingOrder(merged, readingDirection(job.sourceLanguage));
   return db().transaction(async tx => {
     const [locked] = await tx.select({ id: chapterPages.id }).from(chapterPages).where(eq(chapterPages.id, page.id)).for('update');

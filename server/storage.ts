@@ -61,8 +61,9 @@ export async function imageExists(key: string): Promise<boolean> {
   return stat(path.resolve(serverEnv().NERIO_STORAGE_DIR, key)).then(info => info.isFile() && info.size > 0, () => false);
 }
 
+/** Uploaded pages (`0005.png`), hand-edited versions of them (`0005-e123456.png`) and final delivery images. */
 export function isChapterImageKey(key: string): boolean {
-  return /^chapters\/[a-z0-9-]+\/(?:[0-9]{1,4}|delivery-[0-9]{1,4}-[0-9]{1,4}(?:-[0-9]{4})?)\.png$/.test(key);
+  return /^chapters\/[a-z0-9-]+\/(?:[0-9]{1,4}(?:-e[0-9]{1,8})?|delivery-[0-9]{1,4}-[0-9]{1,4}(?:-[0-9]{4})?)\.png$/.test(key);
 }
 
 export function isSeriesCoverKey(key: string): boolean {

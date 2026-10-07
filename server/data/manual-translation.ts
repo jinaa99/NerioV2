@@ -4,6 +4,7 @@ import 'server-only';
  * Translations are typed by a human and only ever written by these functions; nothing here calls a translation API.
  * Every function checks the caller's role; publishing is audited.
  */
+import { createHash, randomInt } from 'node:crypto';
 import { and, asc, desc, eq, inArray, max, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { uuid } from '@/lib/validation';
@@ -14,10 +15,13 @@ import { db, type Executor } from '../db/client';
 import { chapterPages, chapters, series, translationJobLogs, translationJobs, translationSegments } from '../db/schema';
 import { DalError, parseInput } from '../errors';
 import { serverEnv } from '../env';
-import { imageSrc } from '../storage';
+import { deleteImage, imageSrc, putImage } from '../storage';
 import { getSettings } from './settings';
 import { chapterState, manualJobFor, PublishBlocked, publishFinalizedChapter, refreshChapterState, renderPending, requestPageRender } from '../ai/finalize';
 import { ocrPage } from '../ai/ocr-runner';
+import { encodeRaster, rasterize, toPixels } from '../ai/bubbles';
+import { cutRows, eraseArea, regionAfterCut } from '../ai/page-edit';
+import { loadPage } from '../ai/runner';
 import { enqueueTranslationJobs, queuedOrRunning } from '../ai/worker';
 
 const text = (maxLength: number) => z.string().max(maxLength).transform(value => value.replace(/\r\n?/g, '\n'));
@@ -399,4 +403,71 @@ export async function publishManualChapter(chapterId: string) {
     if (error instanceof PublishBlocked) throw new DalError('CONFLICT', `Cannot publish yet: ${error.reasons.join(' ')}`);
     throw error;
   }
+}
+
+/* Page image edits */
+
+const pageEdit = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('erase'), box }),
+  z.object({ type: z.literal('cut'), top: z.number().min(0).max(1), bottom: z.number().min(0).max(1) }).refine(c => c.bottom > c.top, 'Select a strip to cut.'),
+]);
+export type PageEdit = z.input<typeof pageEdit>;
+export type PageEditResult = { src: string | null; width: number; height: number; segments: { id: string; y: number; h: number }[]; deleted: string[]; erase?: 'clean' | 'smudged' };
+/** Hand-edited versions are replaced on the next edit; the uploaded original (`0005.png`) is always kept. */
+const isEditedKey = (key: string) => /-e[0-9]+\.png$/.test(key);
+
+/**
+ * Erase a rectangle or cut a horizontal strip out of a page's source image. The result becomes the page's new source
+ * (translations are lettered on top of it); regions below a cut move up with the artwork.
+ */
+export async function editPageImage(pageId: string, input: PageEdit): Promise<PageEditResult> {
+  const actor = await requireRole('translator');
+  const edit = parseInput(pageEdit, input);
+  const before = await db().transaction(tx => editablePage(tx, pageId));
+  const [{ width, height }] = await db().select({ width: chapterPages.width, height: chapterPages.height }).from(chapterPages).where(eq(chapterPages.id, before.id));
+  const raster = await rasterize((await loadPage(before.sourceKey)).bytes);
+  if (raster.width !== width || raster.height !== height) throw new DalError('CONFLICT', 'The stored page image does not match its recorded size.');
+  let output = raster; let cut: { top: number; bottom: number } | null = null; let erase: 'clean' | 'smudged' | undefined;
+  if (edit.type === 'erase') {
+    const outcome = eraseArea(raster, toPixels(edit.box, width, height));
+    if (outcome === 'unchanged') throw new DalError('INVALID_INPUT', 'Nothing to erase there. Drag a box around the text.');
+    erase = outcome;
+  } else {
+    cut = { top: Math.round(edit.top * height), bottom: Math.round(edit.bottom * height) };
+    if (cut.bottom - cut.top < 1) throw new DalError('INVALID_INPUT', 'Select a taller strip to cut.');
+    if (height - (cut.bottom - cut.top) < 50) throw new DalError('INVALID_INPUT', 'Cutting this much would leave an empty page.');
+    output = cutRows(raster, cut.top, cut.bottom);
+  }
+  const bytes = await encodeRaster(output);
+  const key = `chapters/${before.chapterId}/${String(before.pageNumber).padStart(4, '0')}-e${randomInt(1, 100_000_000)}.png`;
+  await putImage(key, bytes);
+  let result: PageEditResult;
+  try {
+    result = await db().transaction(async tx => {
+      const page = await editablePage(tx, pageId);
+      if (page.sourceKey !== before.sourceKey) throw new DalError('CONFLICT', 'This page was changed meanwhile. Reload and try again.');
+      const moved: PageEditResult['segments'] = [], deleted: string[] = [];
+      if (cut) {
+        const rows = await tx.select({ id: translationSegments.id, y: translationSegments.y, h: translationSegments.h }).from(translationSegments).where(eq(translationSegments.pageId, page.id));
+        for (const row of rows) {
+          const next = regionAfterCut(row, height, cut.top, cut.bottom);
+          if (!next) { deleted.push(row.id); continue; }
+          moved.push({ id: row.id, ...next });
+          await tx.update(translationSegments).set({ y: next.y, h: next.h, typesetStatus: 'pending' }).where(eq(translationSegments.id, row.id));
+        }
+        if (deleted.length) await tx.delete(translationSegments).where(inArray(translationSegments.id, deleted));
+        const rest = await tx.select({ id: translationSegments.id }).from(translationSegments).where(eq(translationSegments.pageId, page.id)).orderBy(asc(translationSegments.position));
+        for (let i = 0; i < rest.length; i++) await tx.update(translationSegments).set({ position: i + 1 }).where(eq(translationSegments.id, rest[i].id));
+      }
+      await tx.update(chapterPages).set({ sourceKey: key, width: output.width, height: output.height, bytes: bytes.length, contentHash: createHash('sha256').update(bytes).digest('hex'),
+        ocrStatus: 'done', ocrError: null, editVersion: sql`${chapterPages.editVersion} + 1` }).where(eq(chapterPages.id, page.id));
+      await tx.insert(translationJobLogs).values({ jobId: page.job.id, attempt: page.job.attempt, stage: 'ocr',
+        message: edit.type === 'erase' ? `Page ${page.pageNumber}: area erased by hand.` : `Page ${page.pageNumber}: ${cut!.bottom - cut!.top}px strip cut out by hand.` });
+      return { src: imageSrc(key), width: output.width, height: output.height, segments: moved, deleted, erase };
+    });
+  } catch (error) { await deleteImage(key); throw error; }
+  if (isEditedKey(before.sourceKey)) await deleteImage(before.sourceKey);
+  // The final image (or the original delivered for a page without text) must be regenerated from the new source.
+  await requestPageRender([before.id], actor);
+  return result;
 }

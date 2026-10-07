@@ -5,7 +5,7 @@
  */
 import { revalidatePath } from 'next/cache';
 import {
-  acceptSegmentImage, addSegment, approveSegments, correctSourceText, deleteSegment, getWorkspaceStatus, moveSegment,
+  acceptSegmentImage, addSegment, approveSegments, correctSourceText, deleteSegment, editPageImage, getWorkspaceStatus, moveSegment, type PageEdit,
   publishManualChapter, retryPageOcr, retryPageRender, saveDraft, saveTranslations, startBatchJobs, updateSegmentLayout,
 } from '../data/manual-translation';
 import { retryJob } from '../data/pipeline';
@@ -49,6 +49,10 @@ export async function updateSegmentLayoutAction(segmentId: string, input: { box?
 
 export async function addSegmentAction(pageId: string, box: { x: number; y: number; w: number; h: number }, sourceText: string) {
   return run(() => addSegment(pageId, box, sourceText));
+}
+
+export async function editPageImageAction(pageId: string, edit: PageEdit) {
+  return run(() => editPageImage(pageId, edit));
 }
 
 export async function deleteSegmentAction(segmentId: string) {

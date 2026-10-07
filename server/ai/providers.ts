@@ -44,9 +44,10 @@ export const LANGUAGE_NAMES: Record<string, string> = {
 export const languageName = (code: string) => LANGUAGE_NAMES[code.toLowerCase().split('-')[0]] ?? code;
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+/** Gemini is trained on box_2d = [ymin, xmin, ymax, xmax] in 0–1000; asked for 0–1 x/y/w/h it often answers in other scales. */
 const regionSchema = z.object({
   text: z.string().max(4000),
-  x: z.number(), y: z.number(), w: z.number(), h: z.number(),
+  box_2d: z.array(z.number()).length(4),
   confidence: z.number().catch(0.8),
   kind: z.string().catch('speech'),
 });
@@ -73,24 +74,47 @@ async function limited<T>(task: () => Promise<T>): Promise<T> {
   finally { active--; waiting.shift()?.(); }
 }
 
+/** When the provider rate-limits, every request in the process waits until this time instead of hammering it. */
+let pausedUntil = 0;
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/** Seconds the provider asks us to wait: the Retry-After header or Gemini's RetryInfo `retryDelay` ("12s"). */
+async function retryDelaySeconds(response: Response): Promise<number | null> {
+  const header = Number(response.headers.get('retry-after'));
+  if (header > 0) return header;
+  const match = (await response.text().catch(() => '')).match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  return match ? Number(match[1]) : null;
+}
+
 async function callModel(model: string, messages: unknown[]): Promise<string> {
   const env = serverEnv();
   if (!env.AI_API_KEY?.trim()) throw new Error('AI_API_KEY is required when an OpenAI-compatible provider is selected.');
   const endpoint = `${env.AI_API_BASE_URL.replace(/\/$/, '')}/chat/completions`;
   let lastError: Error = new Error('AI provider request failed.');
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt) await new Promise(resolve => setTimeout(resolve, 1500 * 2 ** (attempt - 1) + Math.random() * 500));
+  // Rate limits (429) get more and longer retries than server errors: free-tier quotas reset per minute.
+  for (let attempt = 0, rateLimited = 0; attempt < 4 + rateLimited; attempt++) {
+    if (attempt) await sleep(1500 * 2 ** Math.min(attempt - 1, 3) + Math.random() * 500);
+    while (Date.now() < pausedUntil) await sleep(pausedUntil - Date.now() + Math.random() * 1000);
     let response: Response;
     try {
       response = await limited(() => fetch(endpoint, {
         method: 'POST', headers: { Authorization: `Bearer ${env.AI_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages, response_format: { type: 'json_object' } }),
+        body: JSON.stringify({ model, messages, response_format: { type: 'json_object' }, ...(env.AI_REASONING_EFFORT && { reasoning_effort: env.AI_REASONING_EFFORT }) }),
         signal: AbortSignal.timeout(180_000),
       }));
     } catch { lastError = new Error('AI provider request timed out or could not be reached.'); continue; }
-    if (response.status === 429 || response.status >= 500) { lastError = new Error(`AI provider returned HTTP ${response.status}.`); continue; }
+    if (response.status === 429) {
+      lastError = new Error('AI provider returned HTTP 429 (rate limit) repeatedly.');
+      if (rateLimited < 6) rateLimited++;
+      const wait = Math.min(90, (await retryDelaySeconds(response)) ?? 15 * rateLimited);
+      pausedUntil = Math.max(pausedUntil, Date.now() + wait * 1000);
+      console.warn(`[ai] ${model} rate-limited; pausing requests for ${wait}s`);
+      continue;
+    }
+    if (response.status >= 500) { lastError = new Error(`AI provider returned HTTP ${response.status}.`); continue; }
     if (!response.ok) throw new Error(`AI provider returned HTTP ${response.status}.`);
-    const payload = await response.json() as { choices?: { message?: { content?: unknown } }[] };
+    const payload = await response.json() as { choices?: { message?: { content?: unknown } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } };
+    if (payload.usage) console.info(`[ai] ${model} prompt=${payload.usage.prompt_tokens ?? 0} completion=${payload.usage.completion_tokens ?? 0} total=${payload.usage.total_tokens ?? 0}`);
     const content = payload.choices?.[0]?.message?.content;
     if (typeof content !== 'string') throw new MalformedAIOutputError('AI provider returned malformed output.');
     return content;
@@ -124,10 +148,10 @@ Rules:
 - Also include text outside balloons: narration, signs, phone screens, notes.
 - kind: "speech" (balloon dialogue or thought), "narration" (caption boxes, narrator text), "sfx" (sound effects / onomatopoeia drawn as artwork, e.g. BAM, WHOOSH, gasps drawn on the art), "sign" (text on objects, screens, signs), "other".
 - Do NOT include scanlation credits, watermarks, website addresses or page numbers.
-- Box: x, y, w, h normalized 0..1 relative to THIS image (x,y = top-left), tightly around the lettering itself (not the whole balloon).
+- box_2d: [ymin, xmin, ymax, xmax] normalized to 0-1000 relative to THIS image, tightly around the lettering itself (not the whole balloon).
 - confidence 0..1: how sure you are the transcription is exact.
 - If a balloon is cut off by the top or bottom edge of the image, still report the visible part.
-Return only JSON: {"regions":[{"text":"...","x":0.1,"y":0.2,"w":0.3,"h":0.05,"confidence":0.95,"kind":"speech"}]}. Return {"regions":[]} when there is no lettering.`;
+Return only JSON: {"regions":[{"text":"...","box_2d":[200,100,250,400],"confidence":0.95,"kind":"speech"}]}. Return {"regions":[]} when there is no lettering.`;
 
 type Tile = { top: number; height: number };
 /** Tall webtoon strips are read in overlapping slices; vision models downscale whole strips until text is illegible. */
@@ -180,9 +204,10 @@ class OpenAICompatibleOCRProvider implements OCRProvider {
       return structured(env.OCR_MODEL, [{ role: 'user', content: [
         { type: 'text', text: ocrPrompt(languageName(sourceLanguage)) },
         { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${slice.toString('base64')}`, detail: 'high' } },
-      ] }], value => z.object({ regions: z.array(regionSchema).max(300) }).parse(value).regions.flatMap(region => {
-        const x = clamp01(region.x), y = clamp01(region.y);
-        const w = Math.min(1 - x, Math.max(0, region.w)), h = Math.min(1 - y, Math.max(0, region.h));
+      ] }], value => z.object({ regions: z.array(regionSchema.catch(null as never)).max(300) }).parse(value).regions.flatMap(region => {
+        if (!region || !region.box_2d.every(Number.isFinite)) return [];
+        const [top, left, bottom, right] = region.box_2d.map(v => clamp01(v / 1000));
+        const x = Math.min(left, right), y = Math.min(top, bottom), w = Math.abs(right - left), h = Math.abs(bottom - top);
         if (w <= 0.002 || h <= 0.002 || !region.text.trim()) return [];
         return [{ text: region.text.trim(), x, y, w, h, confidence: clamp01(region.confidence), kind: KIND[region.kind.toLowerCase()] ?? 'other' }];
       }));
@@ -259,9 +284,10 @@ class HttpImageCleanupProvider implements ImageCleanupProvider {
   }
 }
 
-/** Local Tesseract by default (free); the external vision model is opt-in via OCR_PROVIDER=openai_compatible. */
+/** Local Tesseract by default (free); the external vision model is opt-in via OCR_PROVIDER=openai_compatible; none skips OCR. */
 export function getOCRProvider(): OCRProvider {
   const provider = serverEnv().OCR_PROVIDER;
+  if (provider === 'none') return { recognize: async () => [] };
   if (provider === 'mock') return new MockOCRProvider();
   if (provider === 'openai_compatible') return new OpenAICompatibleOCRProvider();
   // Loaded lazily: the WASM engine only starts when a page is actually recognized.

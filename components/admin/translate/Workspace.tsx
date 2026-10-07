@@ -8,7 +8,7 @@ import { chapterNo } from '@/lib/catalog';
 import { formatPageText, isTranslated, nextUntranslated, pageComplete, parseBulkTranslation, type PageState } from '@/lib/manual-translation';
 import type { TypesetStyleOverride } from '@/lib/typeset-style';
 import {
-  acceptSegmentImageAction, addSegmentAction, approveSegmentsAction, correctSourceTextAction, deleteSegmentAction, moveSegmentAction,
+  acceptSegmentImageAction, addSegmentAction, approveSegmentsAction, correctSourceTextAction, deleteSegmentAction, editPageImageAction, moveSegmentAction,
   publishManualChapterAction, retryPageOcrAction, retryPageRenderAction, saveDraftAction, saveTranslationsAction, updateSegmentLayoutAction, workspaceStatusAction,
 } from '@/server/actions/translate';
 import type { WorkspaceDTO, WorkspacePageDTO, WorkspaceSegmentDTO } from '@/server/data/manual-translation';
@@ -19,6 +19,8 @@ import StylePanel from './StylePanel';
 
 type Mode = 'translate' | 'ocr' | 'publish';
 type View = 'original' | 'translated' | 'split';
+/** What dragging on the original image does: add a text region, erase an area, or cut a horizontal strip out. */
+type Tool = 'region' | 'erase' | 'cut';
 type SaveState = 'dirty' | 'saving' | 'saved' | 'error';
 
 const BACKUP = (id: string) => `nerio-draft:${id}`;
@@ -114,7 +116,7 @@ export default function Workspace({ data, initialMode }: { data: WorkspaceDTO; i
   const [view, setView] = useState<View>('split');
   const [showBoxes, setShowBoxes] = useState(true);
   const [editBoxes, setEditBoxes] = useState(false);
-  const [drawing, setDrawing] = useState(false);
+  const [drawing, setDrawing] = useState<Tool | null>(null);
   const [preview, setPreview] = useState<'original' | 'translated' | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState('');
@@ -129,7 +131,7 @@ export default function Workspace({ data, initialMode }: { data: WorkspaceDTO; i
   const textOf = useCallback((s: WorkspaceSegmentDTO) => drafts[s.id] ?? s.translatedText ?? '', [drafts]);
 
   const setMode = (next: Mode) => {
-    setModeState(next); setDrawing(false);
+    setModeState(next); setDrawing(null);
     window.history.replaceState(null, '', next === 'translate' ? window.location.pathname : `${window.location.pathname}?mode=${next}`);
   };
 
@@ -254,7 +256,7 @@ export default function Workspace({ data, initialMode }: { data: WorkspaceDTO; i
   };
   const goPage = (idx: number) => {
     const clamped = Math.max(0, Math.min(pages.length - 1, idx));
-    setPageIdx(clamped); setDrawing(false);
+    setPageIdx(clamped); setDrawing(null);
     const first = ordered.find(s => s.pageId === pages[clamped]?.id && !isTranslated(s.translationStatus, data.requireApproval)) ?? ordered.find(s => s.pageId === pages[clamped]?.id);
     setSelected(first?.id ?? null);
   };
@@ -269,7 +271,7 @@ export default function Workspace({ data, initialMode }: { data: WorkspaceDTO; i
     keyHandler.current = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       if (e.key === 'Escape') {
-        if (preview || bulkOpen || styleOpen || drawing) { e.preventDefault(); setPreview(null); setBulkOpen(false); setStyleOpen(false); setDrawing(false); }
+        if (preview || bulkOpen || styleOpen || drawing) { e.preventDefault(); setPreview(null); setBulkOpen(false); setStyleOpen(false); setDrawing(null); }
         return;
       }
       if (mode !== 'translate') return;
@@ -345,9 +347,31 @@ export default function Workspace({ data, initialMode }: { data: WorkspaceDTO; i
       if (isTranslated(segment.translationStatus, false)) markRendering([segment.pageId]);
     }
   };
+  const editImage = async (tool: 'erase' | 'cut', box: Box) => {
+    if (!page) return;
+    setDrawing(null);
+    if (tool === 'cut') {
+      const px = (v: number) => Math.round(v * page.height);
+      const inside = onPage.filter(s => s.y >= box.y && s.y + s.h <= box.y + box.h).length;
+      if (!confirm(`Cut rows ${px(box.y)}–${px(box.y + box.h)} (${px(box.h)}px) out of page ${page.pageNumber}?${inside ? ` ${inside} region${inside === 1 ? '' : 's'} inside the strip will be deleted.` : ''}`)) return;
+    }
+    const edit = tool === 'erase' ? { type: 'erase' as const, box } : { type: 'cut' as const, top: box.y, bottom: box.y + box.h };
+    const res = await runAction(`image:${tool}`, () => editPageImageAction(page.id, edit));
+    if (!res?.data) return;
+    if (res.data.erase === 'smudged') toast('Erased over artwork: the area is blurred, check that it looks acceptable', 'blur_on', 'var(--warning)');
+    else toast(tool === 'erase' ? 'Area erased' : 'Strip cut out');
+    const { src, width, height, segments: moved, deleted } = res.data;
+    setPages(list => list.map(p => p.id === page.id ? { ...p, src, width, height, ocrStatus: 'done', renderStatus: 'queued', editVersion: p.editVersion + 1 } : p));
+    if (tool === 'cut') setSegments(list => {
+      const next = new Map(moved.map(m => [m.id, m]));
+      let n = 0;
+      return list.filter(s => !deleted.includes(s.id)).map(s => s.pageId !== page.id ? s : { ...s, ...next.get(s.id), position: ++n, typesetStatus: 'pending' as const });
+    });
+  };
+  const onDraw = (box: Box) => drawing === 'erase' || drawing === 'cut' ? editImage(drawing, box) : addRegion(box);
   const addRegion = async (box: Box) => {
     if (!page) return;
-    setDrawing(false);
+    setDrawing(null);
     const res = await runAction('add', () => addSegmentAction(page.id, box, ''), 'Region added');
     if (res?.data) {
       const created: WorkspaceSegmentDTO = { id: res.data.id, pageId: page.id, position: res.data.position, ...box, sourceText: '', correctedSourceText: null, translatedText: null,
@@ -477,10 +501,17 @@ export default function Workspace({ data, initialMode }: { data: WorkspaceDTO; i
                 {rendering && <span className="row" style={{ gap: 6, font: '500 11px var(--mono)', color: 'var(--info-text)' }}><span className="spinner" />RENDERING</span>}
                 {page.renderStatus === 'failed' && <Button variant="danger" h={28} onClick={() => retryRender([page.id])}>Retry image</Button>}
               </div>
+              {editable && <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                {([['region', 'add_box', 'Add region', 'Drag around a balloon to type its translation'], ['erase', 'ink_eraser', 'Erase', 'Drag over a watermark or text to paint it out from its surroundings'],
+                  ['cut', 'content_cut', 'Cut strip', 'Drag from the top to the bottom of a strip (ads, credits) to remove it from the page']] as const).map(([tool, icon, label, hint]) =>
+                  <Button key={tool} variant={drawing === tool ? 'primary' : 'secondary'} h={28} icon={icon} title={hint} loading={busy === `image:${tool}`}
+                    disabled={!!busy?.startsWith('image:')} onClick={() => setDrawing(d => d === tool ? null : tool)}>{drawing === tool ? 'Drag on the original…' : label}</Button>)}
+                {view === 'translated' && drawing && <span style={{ fontSize: 12, color: 'var(--warning-text, var(--ink-3))' }}>Switch to Original or Split to draw.</span>}
+              </div>}
               <div style={{ maxHeight: 'calc(100vh - 230px)', overflowY: 'auto', borderRadius: 8 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: view === 'split' ? '1fr 1fr' : '1fr', gap: 8 }}>
                   {view !== 'translated' && <PageCanvas page={page} src={page.src} segments={onPage} selectedId={selected} onSelect={id => select(id, mode === 'translate')} label="ORIGINAL"
-                    editable={editable && (editBoxes || mode === 'ocr')} drawing={drawing} showBoxes={showBoxes} onBoxChange={changeBox} onDraw={addRegion} />}
+                    editable={editable && (editBoxes || mode === 'ocr')} drawing={!!drawing} showBoxes={showBoxes} onBoxChange={changeBox} onDraw={onDraw} />}
                   {view !== 'original' && <PageCanvas page={page} src={translatedSrc} segments={onPage} selectedId={selected} onSelect={id => select(id, mode === 'translate')} label="TRANSLATED"
                     note={page.outputSrc ? (rendering ? ' · UPDATING' : '') : ' · NOT RENDERED YET'} editable={false} drawing={false} showBoxes={showBoxes && view !== 'split'} onBoxChange={changeBox} onDraw={addRegion} />}
                 </div>
@@ -496,7 +527,7 @@ export default function Workspace({ data, initialMode }: { data: WorkspaceDTO; i
                   <label className="row" style={{ gap: 4, fontSize: 12, marginLeft: 'auto' }} title="Shift+Enter inserts a line break"><input type="checkbox" checked={enterSaves} onChange={e => setEnterSaves(e.target.checked)} />Enter = Save &amp; Next</label>
                 </> : <>
                   <span style={{ fontSize: 12, color: 'var(--ink-3)' }}>OCR {page.ocrStatus}{page.ocrError ? ` · ${page.ocrError}` : ''} · fix text, drag boxes, add missed regions, fix the order.</span>
-                  {editable && <Button variant={drawing ? 'primary' : 'secondary'} h={30} icon="add_box" onClick={() => setDrawing(d => !d)}>{drawing ? 'Drag on the image…' : 'Add region'}</Button>}
+                  {editable && <Button variant={drawing === 'region' ? 'primary' : 'secondary'} h={30} icon="add_box" onClick={() => setDrawing(d => d === 'region' ? null : 'region')}>{drawing === 'region' ? 'Drag on the image…' : 'Add region'}</Button>}
                   {editable && <Button variant="ghost" h={30} icon="refresh" loading={busy === 'ocr'} disabled={onPage.some(s => s.translatedText?.trim())} title={onPage.some(s => s.translatedText?.trim()) ? 'This page already has translations' : undefined} onClick={rerunOcr}>Re-run OCR</Button>}
                   <Button variant="ghost" h={30} onClick={() => setMode('translate')}>Start translating →</Button>
                 </>}

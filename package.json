@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "NODE_OPTIONS='--conditions=react-server' tsx --test server/chapter-ingestion.test.ts server/ai/typesetting.test.ts server/ai/segments.test.ts server/ai/tiles.test.ts server/ai/qa.test.ts server/security-boundaries.test.ts server/manual-workflow.test.ts server/ocr-e2e.test.ts",
+    "test": "NODE_OPTIONS='--conditions=react-server' tsx --test server/chapter-ingestion.test.ts server/ai/typesetting.test.ts server/ai/segments.test.ts server/ai/tiles.test.ts server/ai/qa.test.ts server/ai/page-edit.test.ts server/security-boundaries.test.ts server/manual-workflow.test.ts server/ocr-e2e.test.ts",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
